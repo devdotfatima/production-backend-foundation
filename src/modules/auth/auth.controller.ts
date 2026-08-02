@@ -117,7 +117,8 @@ export const deleteAccount: RequestHandler = async (request, response) => {
     requestMetadata(request),
     createStripeClient(),
   );
-  if (!deleted) throw errors.unauthenticated('Password confirmation is required');
+  if (!deleted)
+    throw errors.unauthenticated('Recent password or social reauthentication is required');
   clearAuthCookies(response);
   sendSuccess(request, response, { message: 'Account deleted' });
 };
