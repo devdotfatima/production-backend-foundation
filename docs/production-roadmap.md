@@ -26,9 +26,9 @@ Stripe tests pass without behavior changes.
 - [x] Extract signup/login and social-identity linking.
 - [x] Extract OTP send/verify and phone/email verification.
 - [x] Extract password change/reset flows.
-- [ ] Remove the temporary duplicate identity implementations and retain one owner per use case.
-- [ ] Extract account deletion and credential-confirmation flows.
-- [ ] Keep `auth.service.ts` as a compatibility barrel until callers migrate.
+- [x] Remove the temporary duplicate identity implementations and retain one owner per use case.
+- [x] Extract account deletion and credential-confirmation flows.
+- [x] Keep `auth.service.ts` as a compatibility barrel until callers migrate.
 
 Acceptance: each use case has one clear owner, session/password/OTP tests can inject dependencies,
 and current controller behavior remains unchanged.
@@ -39,7 +39,7 @@ and current controller behavior remains unchanged.
       Stripe, storage, email/SMS, and social identity verification.
 - [ ] Add `createAuthService`, `createBillingService`, and matching controller/router factories.
 - [ ] Keep default factories that compose the current Prisma/environment/provider implementations.
-- [ ] Pass an application dependency registry into `buildApp`.
+- [x] Pass an application dependency registry into `buildApp` for router/provider replacement.
 - [ ] Add tests using in-memory/fake dependencies without module-level mocks.
 
 Acceptance: a client can replace one provider or repository without editing use-case code, and
@@ -47,9 +47,9 @@ integration tests do not require global Prisma/environment mutation.
 
 ## 3. Reusable request and query infrastructure
 
-- [ ] Define allowlisted filtering, sorting, and full-text/search schemas.
+- [x] Define allowlisted filtering, sorting, and text-search schemas.
 - [ ] Add stable cursor composition for non-ID sort keys.
-- [ ] Add durable idempotency middleware backed by `IdempotencyRecord`.
+- [x] Add durable idempotency middleware/runner backed by `IdempotencyRecord`.
 - [ ] Specify request fingerprints, in-progress leases, replayable responses, expiry, and conflict
       behavior.
 - [ ] Add concurrency and replay tests.
@@ -78,12 +78,12 @@ are audited, revocation takes effect immediately, and logs/telemetry never conta
 
 - [x] Add and migrate the initial endpoint/delivery models.
 - [x] Add endpoint create/list/delete and event subscriptions with one-time secrets.
-- [ ] Add endpoint update/disable, secret rotation, and verification state.
+- [ ] Add endpoint update/verification state (delete disables; secret rotation is implemented).
 - [ ] Finish SSRF hardening against DNS rebinding while preserving HTTPS-only destinations.
 - [x] Create deliveries transactionally from domain/outbox events.
 - [x] Sign timestamped payloads.
-- [ ] Define replay tolerance and document constant-time signature verification.
-- [ ] Add bounded retries, delivery leases, dead-letter state, redrive, and retention.
+- [x] Define replay tolerance and document signature verification.
+- [x] Add bounded outbox retries, durable dead-letter state, and permission-gated redrive.
 - [ ] Add concurrency, signature, SSRF, retry, and redrive tests.
 
 Acceptance: business transactions never perform outbound HTTP, every attempt is durable and

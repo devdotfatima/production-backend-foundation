@@ -8,31 +8,42 @@ A secure Express backend foundation using Node.js, TypeScript, Prisma/PostgreSQL
 - Prisma Migrate schema and generated initial migration; bounded Prisma connection pool settings
 - Structured Pino logs with credential/cookie redaction and Sentry error reporting
 - Standard error envelopes and typed Zod route validation for body, headers, params, and query
-- Redis-backed per-user and per-account rate limits with `Retry-After` responses, a bounded
+- Redis-backed per-account/destination, high-ceiling shared-IP, endpoint-wide, and provider-spend
+  limits with `Retry-After` responses, capacity alerts, a bounded
   per-process outage fallback, and fail-closed protection for signup, OTP, and password reset
 - Password signup/login with Argon2id and generic anti-enumeration responses
 - Google and Apple OIDC ID-token social login with provider-account linking
 - Six-digit email/SMS OTPs with Argon2id hashes, five-minute expiry, resend suppression, send limits, and attempt locks
 - 15-minute HS256 access JWTs in `httpOnly` cookies with server-side algorithm allowlisting
+- HKDF-separated, key-versioned token hashing, metadata hashing, and AES-GCM encryption with
+  rotation-safe legacy readers
 - Opaque, hashed refresh tokens with rotation, session families, reuse detection, and session-wide revocation
 - Signed double-submit CSRF protection for every state-changing cookie-authenticated request
 - Email OTP password reset with atomic attempt locks, short-lived single-use reset credentials,
   and session revocation
-- Self-service profile editing, password changes, account deletion, login-session listing/revocation,
+- Self-service profile/email changes, password changes, social reauthentication for destructive
+  actions, anonymizing account erasure, login-session listing/revocation,
   and push-device listing/unregistration
 - Global roles, permissions, seed data, and permission middleware
 - FCM device registration and multicast push; stale/invalid device tokens are deleted
-- Transactional outbox with leased `SKIP LOCKED` claims, durable dead letters, audited redrive,
+- Transactional outbox with Redis instant nudges plus polling, business expiry, leased
+  `SKIP LOCKED` claims, durable dead letters, audited redrive,
   and isolated BullMQ queues/concurrency for email, SMS, push, and internal events
 - Audit events for security- and administration-sensitive changes, with independently keyed HMAC
   integrity signatures and an offline verification command
 - Configurable batch cleanup for expired operational data with independent audit retention
 - Stripe Checkout with a server-owned price catalogue and request idempotency, promotion-code
-  validation, subscription cancellation, cursor-paginated billing lists, policy-limited and
+  validation, subscription upgrade/downgrade/resume/cancellation and Customer Portal, account-erasure
+  cancellation, authoritative object reconciliation, cursor-paginated billing lists, policy-limited and
   operation-idempotent refunds, payment history, raw-body
   signature verification, event deduplication, and ordered payment/subscription projections
-- Owner-scoped direct uploads through either S3-compatible storage or Cloudinary, including signed
-  upload instructions, provider verification, cursor-paginated records, downloads, and deletion
+- Owner-scoped private/public uploads through S3-compatible storage or authenticated Cloudinary
+  delivery, with quarantine → signature check → malware/CDR scan → ready lifecycle, per-user storage
+  and bandwidth quotas, cursor-paginated records, downloads, and deletion
+- UUIDv7 database identifiers, Prisma-enforced soft-delete filters, configurable CORS origins, and
+  exact proxy-hop/CIDR trust
+- Service accounts with rotatable one-time API keys, durable idempotency primitives, allowlisted
+  filtering/sorting/search, and signed outbound customer webhooks with SSRF protection
 - Compile-safe module generation, optional feature mounting, shared cursor pagination, and a single
   audited-transaction primitive for extending the foundation without copying infrastructure code
 - OpenAPI 3.1 JSON at `/openapi.json` and `/api/v1/openapi.json`, plus a CSP-compatible,
@@ -61,6 +72,32 @@ npm run worker
 
 Development uses structured-log notification adapters when provider variables are empty. Production configuration rejects missing Sentry, SMTP, Twilio, Firebase, Stripe, or secure-cookie settings at startup.
 
+### Network boundary and browser origins
+
+`TRUST_PROXY_HOPS` is the exact number of proxies between the public client and Node (direct Node is
+`0`; one ALB/reverse proxy is `1`). Alternatively, set `TRUST_PROXY_CIDRS` to the comma-separated
+CIDRs that are actually allowed to supply forwarding headers. For Cloudflare, deploy the current
+published Cloudflare ranges; do not use a blanket boolean. Configure browser callers with the
+comma-separated `CORS_ALLOWED_ORIGINS` list.
+
+Shared-IP limits are deliberately much higher than destination limits. Hundreds of employees behind
+one office NAT therefore retain normal capacity, while each account/destination remains tightly
+bounded and the endpoint/provider-wide emergency buckets cap aggregate CPU and paid sends.
+
+### Cryptographic key rotation
+
+`TOKEN_HASH_SECRET` remains the legacy bootstrap master. New deployments should configure a
+versioned ring and keep old entries available for reads during rotation:
+
+```dotenv
+CRYPTO_ACTIVE_KEY_ID=2026-08
+CRYPTO_KEYRING={"2026-07":"old-master-at-least-32-characters","2026-08":"new-master-at-least-32-characters"}
+```
+
+HKDF derives independent keys for opaque-token lookup, metadata pseudonymization, and AES-GCM.
+Changing the active ID affects only new writes; old encrypted OTP payloads and token hashes remain
+readable until their key is deliberately retired.
+
 Stripe is disabled when its credentials are empty. When enabled, configure a server-owned price
 catalogue and optionally a default key:
 
@@ -85,6 +122,10 @@ REFUND_MAX_AMOUNT_BY_CURRENCY={"usd":5000,"gbp":4000}
 ```
 
 Requests over a configured limit do not call Stripe and require an administrative workflow.
+Subscription routes support plan changes (`PATCH /api/v1/billing/subscriptions/{id}`), removing a
+scheduled cancellation (`POST .../{id}/resume`), period-end cancellation, and Stripe Customer Portal
+sessions. Webhook projections retrieve the current Stripe object and serialize per-object database
+updates, so equal-second and out-of-order deliveries converge on Stripe's authoritative state.
 
 ## Authentication flow
 
@@ -97,6 +138,9 @@ Requests over a configured limit do not call Stripe and require an administrativ
 7. Password reset uses `POST /api/v1/auth/password-reset/request`, then
    `POST /api/v1/auth/password-reset/verify-otp` to obtain a short-lived `resetToken`, and finally
    `POST /api/v1/auth/password-reset/confirm` with that credential and the new password.
+8. Email change requires a recent password or provider-token reauthentication, verifies the new
+   address by OTP, and revokes all sessions. Social-only account deletion uses the same live social
+   reauthentication rule.
 
 Social login accepts a provider-issued OIDC ID token at `POST /api/v1/auth/oauth/google` or
 `POST /api/v1/auth/oauth/apple`. Configure the matching provider client ID in
@@ -157,8 +201,11 @@ const app = buildApp({
 ```
 
 Disabled modules are not mounted and their provider clients are not constructed. `docs`, `auth`,
-`users`, `roles`, `outbox`, and `audit` can be switched the same way; system health routes stay
+`users`, `roles`, `outbox`, `audit`, `serviceAccounts`, and `customerWebhooks` can be switched the same way; system health routes stay
 available as the application core.
+
+`buildApp({ dependencies: ... })` can inject Stripe/storage adapters or replacement routers while
+the default registry composes the production Prisma/environment implementations.
 
 ### Shared service primitives
 
@@ -304,6 +351,16 @@ Audit events written after the integrity migration are HMAC-signed with
 npm run maintenance:audit-verify
 ```
 
+Existing installations must sign legacy rows before applying the non-null integrity migration:
+
+```bash
+npm run build
+npm run maintenance:audit-backfill
+npm run db:migrate:deploy
+```
+
+Verification exits non-zero for either invalid or unexpected unsigned rows.
+
 This detects record mutation without the external key, but a database-only signature cannot prove
 that rows were not deleted. Regulated products should also stream audit events to immutable/WORM
 storage or a SIEM and retain external checkpoints.
@@ -312,12 +369,26 @@ storage or a SIEM and retain external checkpoints.
 
 Set `UPLOAD_PROVIDER=s3` or `UPLOAD_PROVIDER=cloudinary`. The API returns a short-lived signed upload
 directive; clients send bytes directly to the provider and then call the completion endpoint. The
-server verifies the provider object and exact declared size before marking it ready. S3 supports the
+server verifies exact size, magic bytes, declared MIME, and scan verdict before marking it ready. S3 supports the
 AWS credential chain, explicit credentials, custom S3-compatible endpoints, and an optional CDN
-base URL. Cloudinary uses signed upload parameters and its Admin API for verification and deletion.
+base URL. Cloudinary private assets use authenticated delivery and signed URLs.
 
-The default allowlist is JPEG, PNG, WebP, and PDF. Before accepting untrusted arbitrary documents,
-add malware scanning and file-signature detection; MIME and size controls are not antivirus.
+`visibility=PRIVATE` is the default. Documents remain quarantined unless a scanner/CDR webhook is
+configured; production configuration rejects PDF/document allowlists without it. Configure
+`UPLOAD_SCAN_WEBHOOK_URL`, storage and monthly bandwidth quotas, and provider retention/deletion
+policies before launch.
+
+### API keys, idempotency, and outbound webhooks
+
+Administrators can create service accounts and one-time API keys under `/api/v1/service-accounts`;
+callers authenticate with `x-api-key`. Keys store only versioned hashes and can be revoked or expired.
+`requireIdempotencyKey` plus `runIdempotent` provides durable request fingerprints, replay, expiry,
+and conflicting-reuse detection for new mutations.
+
+Users manage outbound endpoints under `/api/v1/webhook-endpoints`. Delivery is transactional through
+the outbox, HTTPS-only, DNS/private-range checked, redirect-disabled, bounded by worker retries, and
+signed as `t=<unix>,v1=<HMAC-SHA256>` over `<timestamp>.<raw-body>`. Secrets are shown once and can be
+rotated. Consumers should enforce a five-minute timestamp tolerance and deduplicate `x-webhook-id`.
 
 ## Verification
 
