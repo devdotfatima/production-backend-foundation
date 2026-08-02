@@ -5,6 +5,7 @@ declare global {
     interface Request {
       auth?: AccessClaims;
       permissionEpoch?: number;
+      idempotencyKey?: string;
       serviceAuth?: {
         apiKeyId: string;
         serviceAccountId: string;
