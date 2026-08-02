@@ -1,4 +1,4 @@
-import express, { type Express } from 'express';
+import express, { type Express, type Router } from 'express';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -12,8 +12,10 @@ import { rolesRouter } from '#app/modules/roles/roles.routes.js';
 import { outboxRouter } from '#app/modules/outbox/outbox.routes.js';
 import { createStripeRouters } from '#app/modules/stripe/stripe.routes.js';
 import { createStripeClient } from '#app/modules/stripe/stripe.client.js';
+import type { StripeClient } from '#app/modules/stripe/stripe.client.js';
 import { usersRouter } from '#app/modules/users/users.routes.js';
 import { createUploadProvider } from '#app/modules/uploads/uploads.provider.js';
+import type { UploadProviderAdapter } from '#app/modules/uploads/uploads.provider.js';
 import { createUploadsRouter } from '#app/modules/uploads/uploads.routes.js';
 import { systemRouter } from '#app/modules/system/system.routes.js';
 import { docsRouter } from '#app/modules/docs/docs.routes.js';
@@ -37,6 +39,15 @@ export interface AppModules {
 
 export interface BuildAppOptions {
   modules?: Partial<AppModules>;
+  dependencies?: {
+    stripeClient?: StripeClient | null;
+    uploadProvider?: UploadProviderAdapter | null;
+    authRouter?: Router;
+    usersRouter?: Router;
+    rolesRouter?: Router;
+    outboxRouter?: Router;
+    auditRouter?: Router;
+  };
 }
 
 export const defaultAppModules: Readonly<AppModules> = {
@@ -55,8 +66,19 @@ export const defaultAppModules: Readonly<AppModules> = {
 export function buildApp(options: BuildAppOptions = {}): Express {
   const app = express();
   const modules = { ...defaultAppModules, ...options.modules };
-  const stripeRouters = modules.billing ? createStripeRouters(createStripeClient()) : null;
-  const uploadsRouter = modules.uploads ? createUploadsRouter(createUploadProvider(env)) : null;
+  const dependencies = options.dependencies ?? {};
+  const stripeClient = modules.billing
+    ? Object.hasOwn(dependencies, 'stripeClient')
+      ? (dependencies.stripeClient ?? null)
+      : createStripeClient()
+    : null;
+  const uploadProvider = modules.uploads
+    ? Object.hasOwn(dependencies, 'uploadProvider')
+      ? (dependencies.uploadProvider ?? null)
+      : createUploadProvider(env)
+    : null;
+  const stripeRouters = modules.billing ? createStripeRouters(stripeClient) : null;
+  const uploadsRouter = modules.uploads ? createUploadsRouter(uploadProvider) : null;
   app.disable('x-powered-by');
   // Trust exactly the configured network boundary. A blanket boolean would allow
   // client-controlled forwarding headers whenever one proxy hop is bypassed.
@@ -89,12 +111,12 @@ export function buildApp(options: BuildAppOptions = {}): Express {
   app.use(express.urlencoded({ extended: false, limit: '100kb' }));
   app.use(systemRouter);
   app.use(csrfProtection);
-  if (modules.auth) app.use('/api/v1/auth', authRouter);
+  if (modules.auth) app.use('/api/v1/auth', dependencies.authRouter ?? authRouter);
   if (stripeRouters) app.use('/api/v1/billing', stripeRouters.billingRouter);
-  if (modules.users) app.use('/api/v1/users', usersRouter);
-  if (modules.roles) app.use('/api/v1/roles', rolesRouter);
-  if (modules.outbox) app.use('/api/v1/outbox-events', outboxRouter);
-  if (modules.audit) app.use('/api/v1/audit-events', auditRouter);
+  if (modules.users) app.use('/api/v1/users', dependencies.usersRouter ?? usersRouter);
+  if (modules.roles) app.use('/api/v1/roles', dependencies.rolesRouter ?? rolesRouter);
+  if (modules.outbox) app.use('/api/v1/outbox-events', dependencies.outboxRouter ?? outboxRouter);
+  if (modules.audit) app.use('/api/v1/audit-events', dependencies.auditRouter ?? auditRouter);
   if (uploadsRouter) app.use('/api/v1/uploads', uploadsRouter);
   if (modules.serviceAccounts) app.use('/api/v1/service-accounts', serviceAccountsRouter);
   if (modules.customerWebhooks) app.use('/api/v1/webhook-endpoints', customerWebhooksRouter);
