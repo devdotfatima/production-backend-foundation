@@ -24,8 +24,9 @@ Stripe tests pass without behavior changes.
 - [x] Extract shared auth types, time helpers, and audit metadata.
 - [x] Extract session creation, rotation, revocation, and reuse detection.
 - [x] Extract signup/login and social-identity linking.
-- [ ] Extract OTP send/verify and phone/email verification.
-- [ ] Extract password change/reset flows.
+- [x] Extract OTP send/verify and phone/email verification.
+- [x] Extract password change/reset flows.
+- [ ] Remove the temporary duplicate identity implementations and retain one owner per use case.
 - [ ] Extract account deletion and credential-confirmation flows.
 - [ ] Keep `auth.service.ts` as a compatibility barrel until callers migrate.
 
@@ -58,25 +59,30 @@ SQL-like input, and duplicate mutations cannot execute twice.
 
 ## 4. Service accounts and API keys
 
-- [ ] Finalize and migrate the existing preliminary Prisma models.
-- [ ] Generate high-entropy keys once, store only hashes, and expose a safe lookup prefix.
-- [ ] Add service-account lifecycle and key rotation/revocation services.
-- [ ] Add constant-time API-key authentication and last-used tracking.
-- [ ] Add allowlisted scopes/permissions and make human-vs-service identity explicit in request
-      claims and audit records.
-- [ ] Add permission-gated administration routes, Zod schemas, generated OpenAPI, and tests.
-- [ ] Add per-key rate limits and incident-response documentation.
+- [x] Add service-account/API-key models and the initial migration.
+- [x] Issue one-time API-key secrets and store only a lookup-safe hash and display prefix.
+- [x] Reject unknown, expired, revoked, deleted, inactive, or under-scoped credentials.
+- [x] Add create/key-issue/revoke endpoints behind an explicit management permission.
+- [ ] Replace free-form permissions with a centrally allowlisted permission catalog.
+- [ ] Add service-account list/update/disable, key list/rotate, and last-used inspection flows.
+- [ ] Audit service-account, permission, issuance, rotation, revocation, and disable operations.
+- [ ] Define Bearer/API-key precedence and apply API-key auth to documented machine endpoints.
+- [ ] Add per-key rate limits without performing an unbounded database write on every request.
+- [ ] Add lifecycle, scope-denial, expiry, revocation, rotation, concurrency, and audit tests.
+- [ ] Document secret handling and expose the management API through generated OpenAPI.
 
-Acceptance: plaintext keys are never persisted or logged, revoked keys fail immediately, and every
-machine mutation is attributable to one service account/key.
+Acceptance: raw keys are shown once, permissions are deny-by-default, credential lifecycle changes
+are audited, revocation takes effect immediately, and logs/telemetry never contain raw keys.
 
 ## 5. Outbound customer webhooks
 
-- [ ] Finalize and migrate endpoint/delivery models.
-- [ ] Add endpoint CRUD, event subscriptions, secret rotation, and verification state.
-- [ ] Enforce HTTPS and SSRF protections for destinations.
-- [ ] Create deliveries transactionally from domain/outbox events.
-- [ ] Sign timestamped payloads, define replay tolerance, and document verification.
+- [x] Add and migrate the initial endpoint/delivery models.
+- [x] Add endpoint create/list/delete and event subscriptions with one-time secrets.
+- [ ] Add endpoint update/disable, secret rotation, and verification state.
+- [ ] Finish SSRF hardening against DNS rebinding while preserving HTTPS-only destinations.
+- [x] Create deliveries transactionally from domain/outbox events.
+- [x] Sign timestamped payloads.
+- [ ] Define replay tolerance and document constant-time signature verification.
 - [ ] Add bounded retries, delivery leases, dead-letter state, redrive, and retention.
 - [ ] Add concurrency, signature, SSRF, retry, and redrive tests.
 
@@ -115,8 +121,8 @@ alerted, and an on-call engineer can execute the runbook without inventing steps
 1. Service splits and compatibility barrels.
 2. Dependency-injected factories.
 3. Query/idempotency infrastructure.
-4. Service accounts/API keys.
-5. Outbound customer webhooks.
+4. Service-account/API-key hardening.
+5. Outbound customer-webhook hardening.
 6. Telemetry, metrics, and SLO alerts.
 7. Backup verification and restore drill.
 
