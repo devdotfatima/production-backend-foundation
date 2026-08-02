@@ -1,0 +1,587 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_DATABASE_URL")
+}
+
+enum UserStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+  DISABLED
+}
+
+enum OtpChannel {
+  EMAIL
+  SMS
+}
+
+enum OtpPurpose {
+  SIGNUP
+  LOGIN
+  VERIFY_EMAIL
+  VERIFY_PHONE
+  PASSWORD_RESET
+  EMAIL_CHANGE
+}
+
+enum NotificationChannel {
+  EMAIL
+  SMS
+  PUSH
+  INTERNAL
+}
+
+enum OutboxStatus {
+  PENDING
+  CLAIMED
+  ENQUEUED
+  PROCESSING
+  DELIVERED
+  FAILED
+  DEAD_LETTER
+}
+
+enum StripeEventStatus {
+  RECEIVED
+  PROCESSING
+  PROCESSED
+  FAILED
+}
+
+enum SocialProvider {
+  GOOGLE
+  APPLE
+}
+
+enum UploadProvider {
+  S3
+  CLOUDINARY
+}
+
+enum UploadStatus {
+  PENDING
+  QUARANTINED
+  SCANNING
+  READY
+  REJECTED
+  FAILED
+  DELETED
+}
+
+enum UploadVisibility {
+  PRIVATE
+  PUBLIC
+}
+
+model User {
+  id               String     @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  email            String?    @unique
+  phone            String?    @unique
+  passwordHash     String?
+  displayName      String?
+  pendingEmail     String?    @unique
+  stripeCustomerId String?    @unique
+  permissionEpoch  Int        @default(0)
+  status           UserStatus @default(PENDING)
+  emailVerifiedAt  DateTime?  @db.Timestamptz(3)
+  phoneVerifiedAt  DateTime?  @db.Timestamptz(3)
+  lastLoginAt      DateTime?  @db.Timestamptz(3)
+  createdAt        DateTime   @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime   @updatedAt @db.Timestamptz(3)
+  deletedAt        DateTime?  @db.Timestamptz(3)
+
+  sessions            Session[]
+  refreshTokens       RefreshToken[]
+  otpChallenges       OtpChallenge[]
+  passwordResetTokens PasswordResetToken[]
+  devices             Device[]
+  socialAccounts      SocialAccount[]
+  stripeSubscriptions StripeSubscription[]
+  stripePayments      StripePayment[]
+  stripeRefunds       StripeRefundOperation[]
+  uploads             Upload[]
+  uploadBandwidthUsage UploadBandwidthUsage[]
+  webhookEndpoints    CustomerWebhookEndpoint[]
+  roles               UserRole[]
+  auditEvents         AuditEvent[]         @relation("AuditActor")
+
+  @@index([status, deletedAt])
+  @@map("users")
+}
+
+model Role {
+  id          String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  name        String    @unique
+  description String?
+  isSystem    Boolean   @default(false)
+  createdAt   DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime  @updatedAt @db.Timestamptz(3)
+  deletedAt   DateTime? @db.Timestamptz(3)
+
+  users       UserRole[]
+  permissions RolePermission[]
+
+  @@index([deletedAt])
+  @@map("roles")
+}
+
+model Permission {
+  id          String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  code        String    @unique
+  description String?
+  createdAt   DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime  @updatedAt @db.Timestamptz(3)
+  deletedAt   DateTime? @db.Timestamptz(3)
+
+  roles RolePermission[]
+
+  @@index([deletedAt])
+  @@map("permissions")
+}
+
+model UserRole {
+  id        String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  userId    String    @db.Uuid
+  roleId    String    @db.Uuid
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime  @updatedAt @db.Timestamptz(3)
+  deletedAt DateTime? @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, roleId])
+  @@index([roleId, deletedAt])
+  @@map("user_roles")
+}
+
+model RolePermission {
+  id           String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  roleId       String    @db.Uuid
+  permissionId String    @db.Uuid
+  createdAt    DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime  @updatedAt @db.Timestamptz(3)
+  deletedAt    DateTime? @db.Timestamptz(3)
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, permissionId])
+  @@index([permissionId, deletedAt])
+  @@map("role_permissions")
+}
+
+model Session {
+  id           String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  userId       String    @db.Uuid
+  familyId     String    @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  ipHash       String?
+  userAgent    String?
+  expiresAt    DateTime  @db.Timestamptz(3)
+  revokedAt    DateTime? @db.Timestamptz(3)
+  revokeReason String?
+  lastSeenAt   DateTime  @default(now()) @db.Timestamptz(3)
+  createdAt    DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime  @updatedAt @db.Timestamptz(3)
+  deletedAt    DateTime? @db.Timestamptz(3)
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  refreshTokens RefreshToken[]
+
+  @@index([userId, revokedAt])
+  @@index([familyId])
+  @@index([expiresAt, id])
+  @@index([revokedAt, id])
+  @@map("sessions")
+}
+
+model RefreshToken {
+  id                String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  userId            String    @db.Uuid
+  sessionId         String    @db.Uuid
+  tokenHash         String    @unique
+  replacedByTokenId String?   @unique @db.Uuid
+  expiresAt         DateTime  @db.Timestamptz(3)
+  consumedAt        DateTime? @db.Timestamptz(3)
+  revokedAt         DateTime? @db.Timestamptz(3)
+  createdAt         DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt         DateTime  @updatedAt @db.Timestamptz(3)
+  deletedAt         DateTime? @db.Timestamptz(3)
+
+  user       User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  session    Session       @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  replacedBy RefreshToken? @relation("TokenRotation", fields: [replacedByTokenId], references: [id])
+  replaces   RefreshToken? @relation("TokenRotation")
+
+  @@index([sessionId, revokedAt])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+model OtpChallenge {
+  id                    String     @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  userId                String?    @db.Uuid
+  normalizedDestination String
+  channel               OtpChannel
+  purpose               OtpPurpose
+  codeHash              String
+  attempts              Int        @default(0)
+  maxAttempts           Int        @default(5)
+  sentAt                DateTime   @default(now()) @db.Timestamptz(3)
+  expiresAt             DateTime   @db.Timestamptz(3)
+  verifiedAt            DateTime?  @db.Timestamptz(3)
+  consumedAt            DateTime?  @db.Timestamptz(3)
+  lockedAt              DateTime?  @db.Timestamptz(3)
+  createdAt             DateTime   @default(now()) @db.Timestamptz(3)
+  updatedAt             DateTime   @updatedAt @db.Timestamptz(3)
+  deletedAt             DateTime?  @db.Timestamptz(3)
+
+  user               User?               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  passwordResetToken PasswordResetToken?
+
+  @@index([normalizedDestination, purpose, createdAt])
+  @@index([expiresAt])
+  @@map("otp_challenges")
+}
+
+model PasswordResetToken {
+  id             String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  userId         String    @db.Uuid
+  otpChallengeId String    @unique @db.Uuid
+  tokenHash      String    @unique
+  expiresAt      DateTime  @db.Timestamptz(3)
+  usedAt         DateTime? @db.Timestamptz(3)
+  createdAt      DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime  @updatedAt @db.Timestamptz(3)
+  deletedAt      DateTime? @db.Timestamptz(3)
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  otpChallenge OtpChallenge @relation(fields: [otpChallengeId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@map("password_reset_tokens")
+}
+
+model Device {
+  id         String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  userId     String    @db.Uuid
+  fcmToken   String    @unique
+  platform   String?
+  lastSeenAt DateTime  @default(now()) @db.Timestamptz(3)
+  createdAt  DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt  DateTime  @updatedAt @db.Timestamptz(3)
+  deletedAt  DateTime? @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, deletedAt])
+  @@map("devices")
+}
+
+model SocialAccount {
+  id                String         @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  userId            String         @db.Uuid
+  provider          SocialProvider
+  providerAccountId String
+  email             String?
+  createdAt         DateTime       @default(now()) @db.Timestamptz(3)
+  updatedAt         DateTime       @updatedAt @db.Timestamptz(3)
+  deletedAt         DateTime?      @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId, deletedAt])
+  @@map("social_accounts")
+}
+
+model OutboxEvent {
+  id                 String              @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  aggregateType      String
+  aggregateId        String
+  eventType          String
+  channel            NotificationChannel
+  payload            Json
+  dedupeKey          String              @unique
+  status             OutboxStatus        @default(PENDING)
+  attempts           Int                 @default(0)
+  deliveryGeneration Int                 @default(0)
+  availableAt        DateTime            @default(now()) @db.Timestamptz(3)
+  expiresAt          DateTime?           @db.Timestamptz(3)
+  claimedAt          DateTime?           @db.Timestamptz(3)
+  claimExpiresAt     DateTime?           @db.Timestamptz(3)
+  claimToken         String?             @db.Uuid
+  enqueuedAt         DateTime?           @db.Timestamptz(3)
+  deliveredAt        DateTime?           @db.Timestamptz(3)
+  failedAt           DateTime?           @db.Timestamptz(3)
+  deadLetteredAt     DateTime?           @db.Timestamptz(3)
+  lastError          String?
+  createdAt          DateTime            @default(now()) @db.Timestamptz(3)
+  updatedAt          DateTime            @updatedAt @db.Timestamptz(3)
+  deletedAt          DateTime?           @db.Timestamptz(3)
+
+  @@index([status, availableAt, createdAt])
+  @@index([status, expiresAt])
+  @@index([status, claimExpiresAt])
+  @@index([status, deadLetteredAt, id])
+  @@index([status, updatedAt, id])
+  @@index([aggregateType, aggregateId])
+  @@map("outbox_events")
+}
+
+model AuditEvent {
+  id          String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  actorUserId String?   @db.Uuid
+  action      String
+  entityType  String
+  entityId    String?
+  requestId   String?
+  ipHash      String?
+  userAgent   String?
+  metadata    Json?
+  integrityHash String
+  integrityVersion Int @default(1)
+  createdAt   DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime  @updatedAt @db.Timestamptz(3)
+  deletedAt   DateTime? @db.Timestamptz(3)
+
+  actor User? @relation("AuditActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([actorUserId, createdAt])
+  @@index([entityType, entityId, createdAt])
+  @@index([createdAt, id])
+  @@map("audit_events")
+}
+
+model StripeWebhookEvent {
+  id              String            @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  stripeEventId   String            @unique
+  stripeCreatedAt DateTime          @db.Timestamptz(3)
+  type            String
+  apiVersion      String?
+  livemode        Boolean
+  payload         Json
+  status          StripeEventStatus @default(RECEIVED)
+  processedAt     DateTime?         @db.Timestamptz(3)
+  lastError       String?
+  createdAt       DateTime          @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime          @updatedAt @db.Timestamptz(3)
+  deletedAt       DateTime?         @db.Timestamptz(3)
+
+  @@index([status, createdAt])
+  @@map("stripe_webhook_events")
+}
+
+model StripeSubscription {
+  id                       String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  userId                   String    @db.Uuid
+  stripeSubscriptionId     String    @unique
+  status                   String
+  priceId                  String?
+  currency                 String?
+  currentPeriodStart       DateTime? @db.Timestamptz(3)
+  currentPeriodEnd         DateTime? @db.Timestamptz(3)
+  cancelAtPeriodEnd        Boolean   @default(false)
+  canceledAt               DateTime? @db.Timestamptz(3)
+  lastStripeEventId        String?
+  lastStripeEventCreatedAt DateTime? @db.Timestamptz(3)
+  createdAt                DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt                DateTime  @updatedAt @db.Timestamptz(3)
+  deletedAt                DateTime? @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status, deletedAt])
+  @@map("stripe_subscriptions")
+}
+
+model StripePayment {
+  id                       String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  userId                   String    @db.Uuid
+  stripePaymentIntentId    String?   @unique
+  checkoutSessionId        String?   @unique
+  chargeId                 String?   @unique
+  status                   String
+  amount                   Int?
+  amountRefunded           Int       @default(0)
+  currency                 String?
+  lastStripeEventId        String?
+  lastStripeEventCreatedAt DateTime? @db.Timestamptz(3)
+  createdAt                DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt                DateTime  @updatedAt @db.Timestamptz(3)
+  deletedAt                DateTime? @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status, createdAt])
+  @@map("stripe_payments")
+}
+
+model StripeRefundOperation {
+  id                 String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  userId             String    @db.Uuid
+  idempotencyKeyHash String
+  requestHash        String
+  paymentIntentId    String?
+  chargeId           String?
+  requestedAmount    Int?
+  stripeRefundId     String?   @unique
+  status             String    @default("PENDING")
+  amount             Int?
+  currency           String?
+  lastError          String?
+  completedAt        DateTime? @db.Timestamptz(3)
+  createdAt          DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt          DateTime  @updatedAt @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, idempotencyKeyHash])
+  @@index([userId, createdAt])
+  @@index([paymentIntentId])
+  @@index([chargeId])
+  @@map("stripe_refund_operations")
+}
+
+model Upload {
+  id            String         @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  userId        String         @db.Uuid
+  provider      UploadProvider
+  status        UploadStatus   @default(PENDING)
+  visibility    UploadVisibility @default(PRIVATE)
+  objectKey     String
+  originalName  String
+  contentType   String
+  expectedSize  BigInt
+  actualSize    BigInt?
+  checksum      String?
+  detectedContentType String?
+  scanProvider  String?
+  scanReference String?
+  scanVerdict   String?
+  scannedAt     DateTime?      @db.Timestamptz(3)
+  url           String?
+  uploadExpiresAt DateTime     @db.Timestamptz(3)
+  readyAt       DateTime?      @db.Timestamptz(3)
+  createdAt     DateTime       @default(now()) @db.Timestamptz(3)
+  updatedAt     DateTime       @updatedAt @db.Timestamptz(3)
+  deletedAt     DateTime?      @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, objectKey])
+  @@index([userId, status, createdAt])
+  @@index([status, uploadExpiresAt])
+  @@map("uploads")
+}
+
+model UploadBandwidthUsage {
+  id          String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  userId      String   @db.Uuid
+  periodStart DateTime @db.Date
+  bytes       BigInt   @default(0)
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, periodStart])
+  @@map("upload_bandwidth_usage")
+}
+
+model ServiceAccount {
+  id              String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  name            String    @unique
+  permissions     String[]  @default([])
+  permissionEpoch Int       @default(0)
+  active          Boolean   @default(true)
+  createdAt       DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime  @updatedAt @db.Timestamptz(3)
+  deletedAt       DateTime? @db.Timestamptz(3)
+
+  apiKeys ApiKey[]
+
+  @@index([active, deletedAt])
+  @@map("service_accounts")
+}
+
+model ApiKey {
+  id               String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  serviceAccountId String    @db.Uuid
+  name             String
+  prefix           String
+  keyHash          String    @unique
+  expiresAt        DateTime? @db.Timestamptz(3)
+  lastUsedAt       DateTime? @db.Timestamptz(3)
+  revokedAt        DateTime? @db.Timestamptz(3)
+  createdAt        DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime  @updatedAt @db.Timestamptz(3)
+  deletedAt        DateTime? @db.Timestamptz(3)
+
+  serviceAccount ServiceAccount @relation(fields: [serviceAccountId], references: [id], onDelete: Cascade)
+
+  @@index([serviceAccountId, revokedAt, deletedAt])
+  @@map("api_keys")
+}
+
+model IdempotencyRecord {
+  id          String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  actorKey    String
+  scope       String
+  keyHash     String
+  requestHash String
+  statusCode  Int?
+  response    Json?
+  expiresAt   DateTime  @db.Timestamptz(3)
+  createdAt   DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime  @updatedAt @db.Timestamptz(3)
+  deletedAt   DateTime? @db.Timestamptz(3)
+
+  @@unique([actorKey, scope, keyHash])
+  @@index([expiresAt])
+  @@map("idempotency_records")
+}
+
+model CustomerWebhookEndpoint {
+  id              String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  userId          String    @db.Uuid
+  url             String
+  description     String?
+  events          String[]
+  secretEncrypted String
+  active          Boolean   @default(true)
+  createdAt       DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime  @updatedAt @db.Timestamptz(3)
+  deletedAt       DateTime? @db.Timestamptz(3)
+
+  user       User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deliveries CustomerWebhookDelivery[]
+
+  @@index([userId, active, deletedAt])
+  @@map("customer_webhook_endpoints")
+}
+
+model CustomerWebhookDelivery {
+  id             String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  endpointId     String    @db.Uuid
+  eventId        String    @unique
+  eventType      String
+  payload        Json
+  attempts       Int       @default(0)
+  lastStatusCode Int?
+  lastError      String?
+  deliveredAt    DateTime? @db.Timestamptz(3)
+  createdAt      DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime  @updatedAt @db.Timestamptz(3)
+  deletedAt      DateTime? @db.Timestamptz(3)
+
+  endpoint CustomerWebhookEndpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+
+  @@index([endpointId, createdAt])
+  @@map("customer_webhook_deliveries")
+}
