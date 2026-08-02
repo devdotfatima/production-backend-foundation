@@ -6,6 +6,7 @@ import {
   create,
   index,
   remove,
+  rotateSecret,
 } from '#app/modules/customer-webhooks/customer-webhooks.controller.js';
 import {
   createWebhookEndpointRequestValidation,
@@ -27,4 +28,11 @@ customerWebhooksRouter.delete(
   userIdentityRateLimit,
   validateRequest(webhookEndpointIdRequestValidation),
   remove,
+);
+customerWebhooksRouter.post(
+  '/:endpointId/rotate-secret',
+  authenticate,
+  userIdentityRateLimit,
+  validateRequest(webhookEndpointIdRequestValidation),
+  rotateSecret,
 );

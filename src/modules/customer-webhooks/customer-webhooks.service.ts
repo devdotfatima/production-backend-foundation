@@ -77,6 +77,16 @@ export async function deleteWebhookEndpoint(userId: string, endpointId: string) 
   if (result.count !== 1) throw errors.notFound('Webhook endpoint not found');
 }
 
+export async function rotateWebhookSecret(userId: string, endpointId: string) {
+  const secret = randomToken(32);
+  const result = await prisma.customerWebhookEndpoint.updateMany({
+    where: { id: endpointId, userId, active: true, deletedAt: null },
+    data: { secretEncrypted: encryptSecret(secret) },
+  });
+  if (result.count !== 1) throw errors.notFound('Webhook endpoint not found');
+  return { secret };
+}
+
 export async function queueCustomerWebhookEvent(
   tx: Prisma.TransactionClient,
   userId: string,

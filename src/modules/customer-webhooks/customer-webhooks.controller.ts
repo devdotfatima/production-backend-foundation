@@ -9,6 +9,7 @@ import {
   createWebhookEndpoint,
   deleteWebhookEndpoint,
   listWebhookEndpoints,
+  rotateWebhookSecret,
 } from '#app/modules/customer-webhooks/customer-webhooks.service.js';
 
 export const index: RequestHandler = async (request, response) => {
@@ -26,4 +27,11 @@ export const remove: RequestHandler = async (request, response) => {
   const { params } = getValidated(request, webhookEndpointIdRequestValidation);
   await deleteWebhookEndpoint(request.auth!.userId, params.endpointId);
   sendSuccess(request, response, { message: 'Webhook endpoint deleted' });
+};
+export const rotateSecret: RequestHandler = async (request, response) => {
+  const { params } = getValidated(request, webhookEndpointIdRequestValidation);
+  sendSuccess(request, response, {
+    message: 'Webhook signing secret rotated; the new secret is shown once',
+    data: await rotateWebhookSecret(request.auth!.userId, params.endpointId),
+  });
 };
