@@ -127,7 +127,11 @@ export async function completeUpload(
     stored.size !== Number(upload.expectedSize) ||
     (stored.contentType !== undefined && stored.contentType !== upload.contentType)
   ) {
-    await provider.deleteObject({ objectKey: upload.objectKey, contentType: upload.contentType, visibility: upload.visibility });
+    await provider.deleteObject({
+      objectKey: upload.objectKey,
+      contentType: upload.contentType,
+      visibility: upload.visibility,
+    });
     await prisma.upload.update({ where: { id: upload.id }, data: { status: 'FAILED' } });
     throw errors.badRequest('Uploaded file does not match the declared size or content type');
   }
@@ -138,7 +142,11 @@ export async function completeUpload(
   });
   const detectedContentType = detectContentType(bytes);
   if (!detectedContentType || detectedContentType !== upload.contentType) {
-    await provider.deleteObject({ objectKey: upload.objectKey, contentType: upload.contentType, visibility: upload.visibility });
+    await provider.deleteObject({
+      objectKey: upload.objectKey,
+      contentType: upload.contentType,
+      visibility: upload.visibility,
+    });
     await prisma.upload.update({
       where: { id: upload.id },
       data: { status: 'REJECTED', detectedContentType, scanVerdict: 'SIGNATURE_MISMATCH' },
@@ -189,7 +197,11 @@ export async function completeUpload(
     throw errors.serviceUnavailable('Upload scanner is temporarily unavailable');
   }
   if (scan.verdict === 'MALICIOUS') {
-    await provider.deleteObject({ objectKey: upload.objectKey, contentType: upload.contentType, visibility: upload.visibility });
+    await provider.deleteObject({
+      objectKey: upload.objectKey,
+      contentType: upload.contentType,
+      visibility: upload.visibility,
+    });
   }
   const ready = await withAuditedTransaction(async (tx, audit) => {
     const accepted = scan.verdict === 'CLEAN';
@@ -286,7 +298,11 @@ export async function deleteUpload(
   if (upload.provider !== provider.kind) {
     throw errors.serviceUnavailable('The configured upload provider has changed');
   }
-  await provider.deleteObject({ objectKey: upload.objectKey, contentType: upload.contentType, visibility: upload.visibility });
+  await provider.deleteObject({
+    objectKey: upload.objectKey,
+    contentType: upload.contentType,
+    visibility: upload.visibility,
+  });
 
   await withAuditedTransaction(async (tx, audit) => {
     await tx.upload.update({

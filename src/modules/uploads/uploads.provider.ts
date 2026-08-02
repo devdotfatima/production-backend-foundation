@@ -33,10 +33,26 @@ export interface UploadProviderAdapter {
     size: number;
     visibility: 'PRIVATE' | 'PUBLIC';
   }): Promise<UploadDirective>;
-  inspectObject(input: { objectKey: string; contentType: string; visibility?: 'PRIVATE' | 'PUBLIC' }): Promise<StoredObjectMetadata>;
-  createDownloadUrl(input: { objectKey: string; contentType: string; visibility?: 'PRIVATE' | 'PUBLIC' }): Promise<string>;
-  readObject(input: { objectKey: string; contentType: string; visibility?: 'PRIVATE' | 'PUBLIC' }): Promise<Buffer>;
-  deleteObject(input: { objectKey: string; contentType: string; visibility?: 'PRIVATE' | 'PUBLIC' }): Promise<void>;
+  inspectObject(input: {
+    objectKey: string;
+    contentType: string;
+    visibility?: 'PRIVATE' | 'PUBLIC';
+  }): Promise<StoredObjectMetadata>;
+  createDownloadUrl(input: {
+    objectKey: string;
+    contentType: string;
+    visibility?: 'PRIVATE' | 'PUBLIC';
+  }): Promise<string>;
+  readObject(input: {
+    objectKey: string;
+    contentType: string;
+    visibility?: 'PRIVATE' | 'PUBLIC';
+  }): Promise<Buffer>;
+  deleteObject(input: {
+    objectKey: string;
+    contentType: string;
+    visibility?: 'PRIVATE' | 'PUBLIC';
+  }): Promise<void>;
 }
 
 function optionalAwsCredentials(config: Env) {
@@ -134,10 +150,7 @@ function signedCloudinaryDeliveryUrl(value: string, secret: string): string {
   const index = url.pathname.indexOf(marker);
   if (index < 0) return value;
   const suffix = url.pathname.slice(index + marker.length);
-  const signature = createHash('sha1')
-    .update(`${suffix}${secret}`)
-    .digest('base64url')
-    .slice(0, 8);
+  const signature = createHash('sha1').update(`${suffix}${secret}`).digest('base64url').slice(0, 8);
   url.pathname = `${url.pathname.slice(0, index + marker.length)}s--${signature}--/${suffix}`;
   return url.toString();
 }
