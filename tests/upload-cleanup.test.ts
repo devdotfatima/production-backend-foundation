@@ -17,8 +17,9 @@ describe('expired upload cleanup', () => {
       kind: 'S3' as const,
       createUpload: vi.fn(),
       inspectObject: vi.fn(),
-      readObject: vi.fn(),
+      readObjectPrefix: vi.fn(),
       createDownloadUrl: vi.fn(),
+      openDownload: vi.fn(),
       deleteObject: vi.fn().mockResolvedValue(undefined),
     };
 

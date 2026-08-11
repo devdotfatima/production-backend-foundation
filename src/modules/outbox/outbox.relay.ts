@@ -2,10 +2,17 @@ import { randomUUID } from 'node:crypto';
 import type { OutboxEvent } from '@prisma/client';
 import { prisma } from '#app/lib/prisma.js';
 import { createRedisConnection } from '#app/lib/redis.js';
+import { withoutTenantScope } from '#app/lib/request-context.js';
 import { OUTBOX_NUDGE_CHANNEL } from '#app/modules/outbox/outbox.service.js';
 import { outboxJobId } from '#app/modules/outbox/outbox.policy.js';
 import { appLogger } from '#app/observability/logger.js';
 import type { OutboxQueueMap } from '#app/queues/notification.queue.js';
+import {
+  captureTraceContext,
+  normalizeTraceContext,
+  withSpan,
+  withTraceContext,
+} from '#app/observability/tracing.js';
 
 const OUTBOX_BATCH_SIZE = 100;
 const OUTBOX_CLAIM_LEASE_MS = 30_000;
@@ -76,10 +83,27 @@ async function enqueueClaimedEvent(event: OutboxEvent, queues: OutboxQueueMap): 
   if (!event.claimToken) throw new Error(`Outbox event ${event.id} is missing its claim token`);
 
   try {
-    await queues[event.channel].add(
-      event.channel.toLowerCase(),
-      { outboxId: event.id, generation: event.deliveryGeneration },
-      { jobId: outboxJobId(event.id, event.deliveryGeneration) },
+    await withTraceContext(normalizeTraceContext(event.traceContext), () =>
+      withSpan(
+        'outbox.enqueue',
+        {
+          'messaging.system': 'bullmq',
+          'messaging.destination.name': event.channel.toLowerCase(),
+          'outbox.event_type': event.eventType,
+        },
+        async () => {
+          const traceContext = captureTraceContext();
+          await queues[event.channel].add(
+            event.channel.toLowerCase(),
+            {
+              outboxId: event.id,
+              generation: event.deliveryGeneration,
+              ...(traceContext ? { traceContext } : {}),
+            },
+            { jobId: outboxJobId(event.id, event.deliveryGeneration) },
+          );
+        },
+      ),
     );
     await prisma.outboxEvent.updateMany({
       where: { id: event.id, status: 'CLAIMED', claimToken: event.claimToken },
@@ -121,17 +145,20 @@ export async function relayOutboxBatch(
 export async function relayAvailableOutbox(queues: OutboxQueueMap): Promise<number> {
   if (relaying) return 0;
   relaying = true;
-  let total = 0;
-  try {
-    for (let batch = 0; batch < OUTBOX_MAX_BATCHES_PER_TICK; batch += 1) {
-      const count = await relayOutboxBatch(queues);
-      total += count;
-      if (count < OUTBOX_BATCH_SIZE) break;
+  // The relay partitions rows across every tenant by design and must not be tenant-scoped.
+  return withoutTenantScope('outbox-relay', async () => {
+    let total = 0;
+    try {
+      for (let batch = 0; batch < OUTBOX_MAX_BATCHES_PER_TICK; batch += 1) {
+        const count = await relayOutboxBatch(queues);
+        total += count;
+        if (count < OUTBOX_BATCH_SIZE) break;
+      }
+      return total;
+    } finally {
+      relaying = false;
     }
-    return total;
-  } finally {
-    relaying = false;
-  }
+  });
 }
 
 function scheduleRelay(queues: OutboxQueueMap): void {

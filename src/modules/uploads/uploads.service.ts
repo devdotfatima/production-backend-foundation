@@ -1,17 +1,21 @@
-import type { Upload } from '@prisma/client';
+import { Prisma, type Upload } from '@prisma/client';
 import { uuidV7 } from '#app/lib/id.js';
 import { env } from '#app/config/env.js';
 import { errors } from '#app/lib/errors.js';
 import { withAuditedTransaction } from '#app/lib/audited-transaction.js';
 import { paginateCursor } from '#app/lib/cursor-pagination.js';
 import { prisma } from '#app/lib/prisma.js';
+import { getRequestContext, runWithRequestContext } from '#app/lib/request-context.js';
 import type { RequestMetadata } from '#app/lib/request-metadata.js';
+import { addOutboxEvent } from '#app/modules/outbox/outbox.service.js';
 import type { UploadProviderAdapter } from '#app/modules/uploads/uploads.provider.js';
 import {
   detectContentType,
   requiresDocumentCdr,
-  scanUploadBytes,
+  scanUpload,
 } from '#app/modules/uploads/upload-security.js';
+
+const SIGNATURE_PREFIX_BYTES = 16;
 
 function requireProvider(
   provider: UploadProviderAdapter | null,
@@ -34,6 +38,16 @@ function objectKey(userId: string): string {
   return `${userId}/${year}/${month}/${uuidV7()}`;
 }
 
+function activeOrganizationId(): string | undefined {
+  const context = getRequestContext();
+  return context?.kind === 'request' ? context.organizationId : undefined;
+}
+
+function uploadQuotaScopeKey(userId: string): string {
+  const organizationId = activeOrganizationId();
+  return organizationId ? `organization:${organizationId}:user:${userId}` : `user:${userId}`;
+}
+
 export async function initiateUpload(
   userId: string,
   input: {
@@ -51,31 +65,38 @@ export async function initiateUpload(
   if (input.size > env.UPLOAD_MAX_BYTES) {
     throw errors.badRequest(`File exceeds the ${env.UPLOAD_MAX_BYTES}-byte upload limit`);
   }
-  const usage = await prisma.upload.aggregate({
-    where: {
-      userId,
-      deletedAt: null,
-      status: { in: ['PENDING', 'QUARANTINED', 'SCANNING', 'READY'] },
-    },
-    _sum: { expectedSize: true },
-  });
-  if (Number(usage._sum.expectedSize ?? 0n) + input.size > env.UPLOAD_USER_STORAGE_QUOTA_BYTES) {
-    throw errors.forbidden('Per-user storage quota exceeded');
-  }
-
   const key = objectKey(userId);
   const expiresAt = new Date(Date.now() + env.UPLOAD_URL_TTL_SECONDS * 1_000);
-  const upload = await prisma.upload.create({
-    data: {
-      userId,
-      provider: provider.kind,
-      objectKey: key,
-      originalName: input.filename,
-      contentType: input.contentType,
-      visibility: input.visibility,
-      expectedSize: BigInt(input.size),
-      uploadExpiresAt: expiresAt,
-    },
+  const quotaScope = uploadQuotaScopeKey(userId);
+  const upload = await prisma.$transaction(async (tx) => {
+    // One user/tenant can initiate from several API replicas concurrently. The transaction-level
+    // advisory lock serializes aggregate + reservation without holding a lock during provider I/O.
+    await tx.$executeRaw(
+      Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${`upload-storage:${quotaScope}`}, 0))`,
+    );
+    const usage = await tx.upload.aggregate({
+      where: {
+        userId,
+        deletedAt: null,
+        status: { in: ['PENDING', 'QUARANTINED', 'SCANNING', 'READY'] },
+      },
+      _sum: { expectedSize: true },
+    });
+    if (Number(usage._sum.expectedSize ?? 0n) + input.size > env.UPLOAD_USER_STORAGE_QUOTA_BYTES) {
+      throw errors.forbidden('Per-user storage quota exceeded');
+    }
+    return tx.upload.create({
+      data: {
+        userId,
+        provider: provider.kind,
+        objectKey: key,
+        originalName: input.filename,
+        contentType: input.contentType,
+        visibility: input.visibility,
+        expectedSize: BigInt(input.size),
+        uploadExpiresAt: expiresAt,
+      },
+    });
   });
 
   try {
@@ -135,12 +156,13 @@ export async function completeUpload(
     await prisma.upload.update({ where: { id: upload.id }, data: { status: 'FAILED' } });
     throw errors.badRequest('Uploaded file does not match the declared size or content type');
   }
-  const bytes = await provider.readObject({
+  const signaturePrefix = await provider.readObjectPrefix({
     objectKey: upload.objectKey,
     contentType: upload.contentType,
     visibility: upload.visibility,
+    maxBytes: SIGNATURE_PREFIX_BYTES,
   });
-  const detectedContentType = detectContentType(bytes);
+  const detectedContentType = detectContentType(signaturePrefix);
   if (!detectedContentType || detectedContentType !== upload.contentType) {
     await provider.deleteObject({
       objectKey: upload.objectKey,
@@ -180,33 +202,44 @@ export async function completeUpload(
     return serializeUpload(quarantined);
   }
 
-  await prisma.upload.update({ where: { id: upload.id }, data: { status: 'SCANNING' } });
-  let scan: Awaited<ReturnType<typeof scanUploadBytes>>;
-  try {
-    scan = await scanUploadBytes({
-      uploadId: upload.id,
-      filename: upload.originalName,
-      contentType: upload.contentType,
-      bytes,
-    });
-  } catch {
-    await prisma.upload.update({
+  if (env.UPLOAD_SCAN_MODE === 'disabled') {
+    return finalizeUploadScan(
+      upload.id,
+      userId,
+      { verdict: 'CLEAN', provider: 'signature-only' },
+      metadata,
+    );
+  }
+
+  const scanning = await withAuditedTransaction(async (tx) => {
+    await tx.upload.update({
       where: { id: upload.id },
-      data: { status: 'QUARANTINED', scanVerdict: 'ERROR' },
+      data: { status: 'SCANNING', scanVerdict: null },
     });
-    throw errors.serviceUnavailable('Upload scanner is temporarily unavailable');
-  }
-  if (scan.verdict === 'MALICIOUS') {
-    await provider.deleteObject({
-      objectKey: upload.objectKey,
-      contentType: upload.contentType,
-      visibility: upload.visibility,
+    await addOutboxEvent(tx, {
+      aggregateType: 'upload',
+      aggregateId: upload.id,
+      eventType: 'upload.scan.requested',
+      channel: 'INTERNAL',
+      payload: { uploadId: upload.id },
+      dedupeKey: `upload-scan:${upload.id}:${stored.checksum ?? stored.size}`,
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1_000),
     });
-  }
+    return tx.upload.findUniqueOrThrow({ where: { id: upload.id } });
+  });
+  return serializeUpload(scanning);
+}
+
+async function finalizeUploadScan(
+  uploadId: string,
+  userId: string,
+  scan: Awaited<ReturnType<typeof scanUpload>>,
+  metadata: RequestMetadata,
+) {
   const ready = await withAuditedTransaction(async (tx, audit) => {
     const accepted = scan.verdict === 'CLEAN';
     await tx.upload.update({
-      where: { id: upload.id },
+      where: { id: uploadId },
       data: {
         status: accepted ? 'READY' : 'REJECTED',
         scanProvider: scan.provider,
@@ -214,20 +247,106 @@ export async function completeUpload(
         scanVerdict: scan.verdict,
         scannedAt: new Date(),
         readyAt: accepted ? new Date() : null,
-        url: accepted && upload.visibility === 'PUBLIC' ? stored.url : null,
+        url: null,
       },
     });
     await audit({
       actorUserId: userId,
       action: accepted ? 'upload.ready' : 'upload.rejected',
       entityType: 'upload',
-      entityId: upload.id,
+      entityId: uploadId,
       metadata: { scanProvider: scan.provider, verdict: scan.verdict },
       ...metadata,
     });
-    return tx.upload.findUniqueOrThrow({ where: { id: upload.id } });
+    return tx.upload.findUniqueOrThrow({ where: { id: uploadId } });
   });
   return serializeUpload(ready);
+}
+
+/** Worker entrypoint for provider I/O; completion requests only quarantine and enqueue. */
+export async function processUploadScan(
+  uploadId: string,
+  provider: UploadProviderAdapter | null,
+): Promise<void> {
+  requireProvider(provider);
+  const upload = await prisma.upload.findFirst({
+    where: {
+      id: uploadId,
+      status: { in: ['QUARANTINED', 'SCANNING', 'REJECTED'] },
+      deletedAt: null,
+    },
+  });
+  if (!upload) return;
+  if (upload.provider !== provider.kind) {
+    throw new Error(`Upload ${upload.id} belongs to unavailable provider ${upload.provider}`);
+  }
+  // A previous attempt may have durably rejected the object and crashed during provider deletion.
+  // Retry deletion without making the malicious object downloadable or rescanning it.
+  if (upload.status === 'REJECTED') {
+    if (upload.scanVerdict === 'MALICIOUS' && !upload.storageDeletedAt) {
+      await provider.deleteObject({
+        objectKey: upload.objectKey,
+        contentType: upload.contentType,
+        visibility: upload.visibility,
+      });
+      await prisma.upload.updateMany({
+        where: { id: upload.id, status: 'REJECTED', storageDeletedAt: null },
+        data: { storageDeletedAt: new Date() },
+      });
+    }
+    return;
+  }
+  await prisma.upload.updateMany({
+    where: { id: upload.id, status: { in: ['QUARANTINED', 'SCANNING'] }, deletedAt: null },
+    data: { status: 'SCANNING', scanVerdict: null },
+  });
+
+  try {
+    const sourceUrl = await provider.createDownloadUrl({
+      objectKey: upload.objectKey,
+      contentType: upload.contentType,
+      visibility: upload.visibility,
+    });
+    const scan = await scanUpload({
+      uploadId: upload.id,
+      filename: upload.originalName,
+      contentType: upload.contentType,
+      size: Number(upload.actualSize ?? upload.expectedSize),
+      checksum: upload.checksum ?? undefined,
+      sourceUrl,
+    });
+    await runWithRequestContext(
+      {
+        kind: 'request',
+        requestId: `worker:upload-scan:${upload.id}`,
+        userId: upload.userId,
+        organizationId: upload.organizationId ?? undefined,
+      },
+      () =>
+        finalizeUploadScan(upload.id, upload.userId, scan, {
+          requestId: `worker:upload-scan:${upload.id}`,
+          ip: 'internal',
+          userAgent: undefined,
+        }),
+    );
+    if (scan.verdict === 'MALICIOUS') {
+      await provider.deleteObject({
+        objectKey: upload.objectKey,
+        contentType: upload.contentType,
+        visibility: upload.visibility,
+      });
+      await prisma.upload.updateMany({
+        where: { id: upload.id, status: 'REJECTED', storageDeletedAt: null },
+        data: { storageDeletedAt: new Date() },
+      });
+    }
+  } catch (error) {
+    await prisma.upload.updateMany({
+      where: { id: upload.id, status: 'SCANNING' },
+      data: { status: 'QUARANTINED', scanVerdict: 'ERROR' },
+    });
+    throw error;
+  }
 }
 
 export async function listUploads(userId: string, input: { cursor?: string; limit: number }) {
@@ -251,36 +370,96 @@ export async function createUploadDownload(
 ) {
   requireProvider(provider);
   const upload = await prisma.upload.findFirst({
-    where: { id: uploadId, userId, status: 'READY', deletedAt: null },
+    where: { id: uploadId, status: 'READY', deletedAt: null },
   });
   if (!upload) throw errors.notFound('Upload not found');
+  if (upload.userId !== userId) {
+    const sharedThroughChat = await prisma.message.findFirst({
+      where: {
+        uploadId: upload.id,
+        deletedAt: null,
+        conversation: {
+          deletedAt: null,
+          participants: {
+            some: { userId, leftAt: null, deletedAt: null },
+          },
+        },
+      },
+      select: { id: true },
+    });
+    if (!sharedThroughChat) throw errors.notFound('Upload not found');
+  }
   if (upload.provider !== provider.kind) {
     throw errors.serviceUnavailable('The configured upload provider has changed');
   }
   const now = new Date();
   const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-  await prisma.$transaction(async (tx) => {
-    const current = await tx.uploadBandwidthUsage.findUnique({
-      where: { userId_periodStart: { userId, periodStart } },
-    });
-    const nextBytes =
-      Number(current?.bytes ?? 0n) + Number(upload.actualSize ?? upload.expectedSize);
-    if (nextBytes > env.UPLOAD_USER_MONTHLY_BANDWIDTH_QUOTA_BYTES) {
-      throw errors.forbidden('Monthly download bandwidth quota exceeded');
+  const increment = upload.actualSize ?? upload.expectedSize;
+  const maximum = BigInt(env.UPLOAD_USER_MONTHLY_BANDWIDTH_QUOTA_BYTES);
+  if (increment > maximum) {
+    throw errors.forbidden('Monthly download bandwidth quota exceeded');
+  }
+  const scopeKey = uploadQuotaScopeKey(userId);
+  const organizationId = activeOrganizationId();
+  const chargeQuota = async () => {
+    try {
+      await prisma.uploadBandwidthUsage.create({
+        data: { userId, organizationId, scopeKey, periodStart, bytes: increment },
+      });
+    } catch (error) {
+      if (!(error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002')) {
+        throw error;
+      }
+      // Conditional increment is one statement, so concurrent downloads cannot both spend the
+      // same remaining quota.
+      const updated = await prisma.uploadBandwidthUsage.updateMany({
+        where: { scopeKey, periodStart, bytes: { lte: maximum - increment } },
+        data: { bytes: { increment } },
+      });
+      if (updated.count !== 1) {
+        throw errors.forbidden('Monthly download bandwidth quota exceeded');
+      }
     }
-    await tx.uploadBandwidthUsage.upsert({
-      where: { userId_periodStart: { userId, periodStart } },
-      create: { userId, periodStart, bytes: BigInt(nextBytes) },
-      update: { bytes: BigInt(nextBytes) },
-    });
-  });
-  return {
-    url: await provider.createDownloadUrl({
+  };
+
+  if (env.UPLOAD_DOWNLOAD_MODE === 'redirect') {
+    if (!provider.createDirectDownload) {
+      throw errors.serviceUnavailable('Direct downloads are unavailable for this provider');
+    }
+    const direct = await provider.createDirectDownload({
       objectKey: upload.objectKey,
       contentType: upload.contentType,
+      filename: upload.originalName,
       visibility: upload.visibility,
-    }),
-    expiresInSeconds: provider.kind === 'S3' ? env.UPLOAD_URL_TTL_SECONDS : null,
+      expiresInSeconds: env.UPLOAD_DOWNLOAD_URL_TTL_SECONDS,
+    });
+    await chargeQuota();
+    return {
+      delivery: 'redirect' as const,
+      ...direct,
+      filename: upload.originalName,
+      contentType: upload.contentType,
+      contentLength: Number(increment),
+    };
+  }
+
+  const download = await provider.openDownload({
+    objectKey: upload.objectKey,
+    contentType: upload.contentType,
+    visibility: upload.visibility,
+  });
+  try {
+    await chargeQuota();
+  } catch (error) {
+    download.body.destroy();
+    throw error;
+  }
+  return {
+    delivery: 'proxy' as const,
+    ...download,
+    filename: upload.originalName,
+    contentType: download.contentType ?? upload.contentType,
+    contentLength: download.contentLength ?? Number(increment),
   };
 }
 

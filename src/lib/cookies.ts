@@ -1,4 +1,4 @@
-import type { Request, Response } from 'express';
+import type { Response } from 'express';
 import { env } from '#app/config/env.js';
 
 export const cookieNames = {
@@ -33,10 +33,4 @@ export function setAuthCookies(
 export function clearAuthCookies(response: Response): void {
   response.clearCookie(cookieNames.access, baseCookie);
   response.clearCookie(cookieNames.refresh, baseCookie);
-}
-
-export function getRefreshToken(request: Request): string | undefined {
-  const cookies = request.cookies as Record<string, unknown> | undefined;
-  const token = cookies?.[cookieNames.refresh];
-  return typeof token === 'string' ? token : undefined;
 }

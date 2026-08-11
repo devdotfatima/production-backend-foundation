@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { describe, expect, it, vi } from 'vitest';
 import {
   deleteInBatches,
@@ -20,11 +21,14 @@ function emptyDelegate(): DelegateDouble {
 function databaseDouble() {
   const delegates = {
     auditEvent: emptyDelegate(),
+    idempotencyRecord: emptyDelegate(),
+    invitation: emptyDelegate(),
     otpChallenge: emptyDelegate(),
     outboxEvent: emptyDelegate(),
     session: emptyDelegate(),
     stripeWebhookEvent: emptyDelegate(),
     upload: emptyDelegate(),
+    uploadBandwidthUsage: emptyDelegate(),
   };
 
   return {
@@ -72,17 +76,52 @@ describe('retention cleanup', () => {
     expect(result.cutoffs.audit).toEqual(new Date('2025-08-02T12:00:00.000Z'));
     expect(result.deleted).toEqual({
       auditEvents: 1,
+      idempotencyRecords: 0,
+      invitations: 0,
       otpChallenges: 3,
       outboxEvents: 0,
       sessions: 0,
       stripeWebhookEvents: 0,
       uploads: 0,
+      uploadBandwidthRows: 0,
     });
     expect(delegates.outboxEvent.findMany.mock.calls[0]?.[0]).toMatchObject({
       where: { status: { in: ['DELIVERED', 'DEAD_LETTER'] } },
     });
     expect(delegates.stripeWebhookEvent.findMany.mock.calls[0]?.[0]).toMatchObject({
       where: { status: 'PROCESSED' },
+    });
+  });
+
+  it('deletes only expired idempotency records with a complete replay result', async () => {
+    const { database, delegates } = databaseDouble();
+    delegates.idempotencyRecord.findMany.mockResolvedValueOnce([{ id: 'completed-record' }]);
+    delegates.idempotencyRecord.deleteMany.mockResolvedValueOnce({ count: 1 });
+    const now = new Date('2026-08-02T12:00:00.000Z');
+
+    const result = await runRetentionCleanup(
+      { dataRetentionDays: 30, auditRetentionDays: 0, batchSize: 100, now },
+      database,
+    );
+
+    expect(result.deleted.idempotencyRecords).toBe(1);
+    expect(delegates.idempotencyRecord.findMany).toHaveBeenCalledWith({
+      where: {
+        expiresAt: { lt: now },
+        statusCode: { not: null },
+        response: { not: Prisma.AnyNull },
+      },
+      select: { id: true },
+      orderBy: { expiresAt: 'asc' },
+      take: 100,
+    });
+    expect(delegates.idempotencyRecord.deleteMany).toHaveBeenCalledWith({
+      where: {
+        id: { in: ['completed-record'] },
+        expiresAt: { lt: now },
+        statusCode: { not: null },
+        response: { not: Prisma.AnyNull },
+      },
     });
   });
 

@@ -1,5 +1,6 @@
-import { UserStatus } from '@prisma/client';
+import { Prisma, UserStatus } from '@prisma/client';
 import { prisma } from '#app/lib/prisma.js';
+import { errors } from '#app/lib/errors.js';
 import {
   encryptSecret,
   hashSecret,
@@ -12,8 +13,11 @@ import { auditMetadata, expiresIn, type RequestMetadata } from '#app/modules/aut
 import { recordInvalidOtpAttempt } from '#app/modules/auth/auth.otp.service.js';
 import { verifySocialIdentity } from '#app/modules/auth/social.service.js';
 import { addOutboxEvent } from '#app/modules/outbox/outbox.service.js';
-import { cancelAllUserSubscriptions } from '#app/modules/stripe/stripe.subscriptions.service.js';
 import type { StripeClient } from '#app/modules/stripe/stripe.client.js';
+import type { UploadProviderAdapter } from '#app/modules/uploads/uploads.provider.js';
+import { withoutTenantScope } from '#app/lib/request-context.js';
+import { publishChatRevocation } from '#app/modules/chat/chat.revocations.js';
+
 export async function deleteAccount(
   userId: string,
   confirmation: {
@@ -22,10 +26,31 @@ export async function deleteAccount(
   },
   metadata: RequestMetadata,
   stripeClient: StripeClient | null,
+  uploadProvider: UploadProviderAdapter | null,
+): Promise<boolean> {
+  // Account erasure is global to the human, not to whichever organization their current session
+  // happens to hold. Provider dependencies are retained in the public signature for backwards
+  // compatibility; external deletion is now performed durably by the worker after commit.
+  void stripeClient;
+  void uploadProvider;
+  const deleted = await withoutTenantScope('account-deletion', () =>
+    deleteAccountUnscoped(userId, confirmation, metadata),
+  );
+  if (deleted) await publishChatRevocation(userId);
+  return deleted;
+}
+
+async function deleteAccountUnscoped(
+  userId: string,
+  confirmation: {
+    password?: string;
+    socialReauth?: { provider: 'google' | 'apple'; idToken: string };
+  },
+  metadata: RequestMetadata,
 ): Promise<boolean> {
   const user = await prisma.user.findFirst({
     where: { id: userId, status: UserStatus.ACTIVE, deletedAt: null },
-    select: { passwordHash: true },
+    select: { passwordHash: true, stripeCustomerId: true },
   });
   if (!user) return false;
   if (user.passwordHash) {
@@ -51,9 +76,51 @@ export async function deleteAccount(
     if (!linked) return false;
   }
 
-  const canceledSubscriptions = await cancelAllUserSubscriptions(userId, stripeClient);
+  const uploads = await prisma.upload.findMany({
+    where: {
+      userId,
+      status: { in: ['PENDING', 'QUARANTINED', 'SCANNING', 'READY'] },
+      deletedAt: null,
+    },
+    select: { id: true, objectKey: true, contentType: true, visibility: true, provider: true },
+  });
+  const otpChallenges = await prisma.otpChallenge.findMany({
+    where: { userId, deletedAt: null },
+    select: { id: true },
+  });
   const deletedAt = new Date();
   await withAuditedTransaction(async (tx, audit) => {
+    const ownerMemberships = await tx.membership.findMany({
+      where: {
+        userId,
+        status: 'ACTIVE',
+        deletedAt: null,
+        role: { name: 'owner', deletedAt: null },
+      },
+      select: { organizationId: true },
+    });
+    // Consistent ordering prevents deadlocks when two owners delete accounts concurrently.
+    for (const organizationId of ownerMemberships
+      .map((membership) => membership.organizationId)
+      .sort()) {
+      await tx.$executeRaw(
+        Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${`organization-owners:${organizationId}`}, 0))`,
+      );
+      const owners = await tx.membership.count({
+        where: {
+          organizationId,
+          status: 'ACTIVE',
+          deletedAt: null,
+          role: { name: 'owner', deletedAt: null },
+        },
+      });
+      if (owners <= 1) {
+        throw errors.conflict(
+          'Transfer ownership or add another owner before deleting this account',
+        );
+      }
+    }
+
     await tx.user.update({
       where: { id: userId },
       data: {
@@ -61,8 +128,12 @@ export async function deleteAccount(
         phone: null,
         passwordHash: null,
         displayName: null,
+        locale: 'en',
         pendingEmail: null,
         stripeCustomerId: null,
+        emailVerifiedAt: null,
+        phoneVerifiedAt: null,
+        lastLoginAt: null,
         status: UserStatus.DISABLED,
         deletedAt,
       },
@@ -75,27 +146,92 @@ export async function deleteAccount(
       where: { userId, revokedAt: null },
       data: { revokedAt: deletedAt },
     });
-    await tx.device.updateMany({ where: { userId, deletedAt: null }, data: { deletedAt } });
-    await tx.socialAccount.updateMany({ where: { userId, deletedAt: null }, data: { deletedAt } });
-    await tx.otpChallenge.updateMany({ where: { userId, deletedAt: null }, data: { deletedAt } });
-    await tx.passwordResetToken.updateMany({
+    await tx.session.updateMany({
       where: { userId, deletedAt: null },
-      data: { deletedAt },
+      data: { ipHash: null, userAgent: null },
     });
-    await tx.upload.updateMany({
+    await tx.device.deleteMany({ where: { userId, deletedAt: null } });
+    await tx.socialAccount.deleteMany({ where: { userId, deletedAt: null } });
+    await tx.passwordResetToken.deleteMany({ where: { userId, deletedAt: null } });
+    await tx.otpChallenge.deleteMany({ where: { userId, deletedAt: null } });
+    await tx.userRole.deleteMany({ where: { userId, deletedAt: null } });
+    await tx.notificationPreference.deleteMany({ where: { userId, deletedAt: null } });
+    await tx.notificationDelivery.updateMany({
       where: { userId, deletedAt: null },
-      data: { status: 'DELETED', url: null, deletedAt },
+      data: { userId: null },
+    });
+    await tx.membership.updateMany({
+      where: { userId, deletedAt: null },
+      data: { status: 'SUSPENDED', deletedAt },
+    });
+    await tx.uploadBandwidthUsage.deleteMany({ where: { userId } });
+    for (const upload of uploads) {
+      await tx.upload.update({
+        where: { id: upload.id },
+        data: {
+          status: 'DELETED',
+          originalName: 'erased',
+          checksum: null,
+          scanReference: null,
+          url: null,
+          deletedAt,
+        },
+      });
+    }
+    const challengeIds = otpChallenges.map((challenge) => challenge.id);
+    const erasedOutboxWhere = {
+      OR: [
+        ...(challengeIds.length > 0
+          ? [{ aggregateType: 'otp_challenge', aggregateId: { in: challengeIds } }]
+          : []),
+        { aggregateType: 'user', aggregateId: userId },
+      ],
+      deletedAt: null,
+    };
+    await tx.outboxEvent.updateMany({
+      where: erasedOutboxWhere,
+      data: { payload: { erased: true }, expiresAt: deletedAt },
+    });
+    await tx.outboxEvent.updateMany({
+      where: {
+        ...erasedOutboxWhere,
+        status: { in: ['PENDING', 'CLAIMED', 'ENQUEUED', 'PROCESSING', 'FAILED'] },
+      },
+      data: {
+        status: 'DEAD_LETTER',
+        lastError: 'Account deleted before delivery',
+        claimToken: null,
+        claimedAt: null,
+        claimExpiresAt: null,
+      },
+    });
+    // Actor keys are tenant-prefixed (`org:<id>:user:<id>`), so match on the stable suffix or a
+    // deleted account would leave its stored responses behind in every organization it joined.
+    await tx.idempotencyRecord.deleteMany({
+      where: { actorKey: { endsWith: `user:${userId}` }, deletedAt: null },
     });
     await tx.stripeSubscription.updateMany({
-      where: { userId, deletedAt: null },
+      // Organization-owned subscriptions survive a member deleting their personal account.
+      where: { userId, organizationId: null, deletedAt: null },
       data: { status: 'canceled', canceledAt: deletedAt, deletedAt },
+    });
+    await addOutboxEvent(tx, {
+      aggregateType: 'account_erasure',
+      aggregateId: userId,
+      eventType: 'account.erasure.requested',
+      channel: 'INTERNAL',
+      payload: {
+        userId,
+        ...(user.stripeCustomerId ? { stripeCustomerId: user.stripeCustomerId } : {}),
+      },
+      dedupeKey: `account-erasure:${userId}`,
     });
     await audit({
       actorUserId: userId,
       action: 'user.account_deleted',
       entityType: 'user',
       entityId: userId,
-      metadata: { canceledSubscriptions },
+      metadata: { queuedUploadObjects: uploads.length, externalCleanupQueued: true },
       ...auditMetadata(metadata),
     });
   });
@@ -212,7 +348,7 @@ export async function verifyEmailChange(
     if (challenge) await recordInvalidOtpAttempt(challenge.id);
     return false;
   }
-  return withAuditedTransaction(async (tx, audit) => {
+  const changed = await withAuditedTransaction(async (tx, audit) => {
     const consumed = await tx.otpChallenge.updateMany({
       where: { id: challenge.id, consumedAt: null, lockedAt: null, expiresAt: { gt: new Date() } },
       data: { consumedAt: new Date() },
@@ -240,4 +376,6 @@ export async function verifyEmailChange(
     });
     return true;
   });
+  if (changed) await publishChatRevocation(userId);
+  return changed;
 }

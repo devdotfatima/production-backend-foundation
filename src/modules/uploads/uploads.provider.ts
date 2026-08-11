@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { Readable } from 'node:stream';
 import {
   DeleteObjectCommand,
   GetObjectCommand,
@@ -25,6 +26,17 @@ export type StoredObjectMetadata = {
   url?: string;
 };
 
+export type DownloadedObject = {
+  body: Readable;
+  contentLength?: number;
+  contentType?: string;
+};
+
+export type DirectDownload = {
+  url: string;
+  expiresAt: Date;
+};
+
 export interface UploadProviderAdapter {
   readonly kind: 'S3' | 'CLOUDINARY';
   createUpload(input: {
@@ -43,10 +55,24 @@ export interface UploadProviderAdapter {
     contentType: string;
     visibility?: 'PRIVATE' | 'PUBLIC';
   }): Promise<string>;
-  readObject(input: {
+  /** Optional because only providers with genuinely expiring signatures may bypass the API. */
+  createDirectDownload?(input: {
+    objectKey: string;
+    contentType: string;
+    filename: string;
+    visibility?: 'PRIVATE' | 'PUBLIC';
+    expiresInSeconds: number;
+  }): Promise<DirectDownload>;
+  openDownload(input: {
     objectKey: string;
     contentType: string;
     visibility?: 'PRIVATE' | 'PUBLIC';
+  }): Promise<DownloadedObject>;
+  readObjectPrefix(input: {
+    objectKey: string;
+    contentType: string;
+    visibility?: 'PRIVATE' | 'PUBLIC';
+    maxBytes: number;
   }): Promise<Buffer>;
   deleteObject(input: {
     objectKey: string;
@@ -64,16 +90,15 @@ function optionalAwsCredentials(config: Env) {
   };
 }
 
-function trimTrailingSlash(value: string): string {
-  return value.replace(/\/+$/, '');
-}
-
 export function createS3UploadProvider(config: Env): UploadProviderAdapter {
   const client = new S3Client({
     region: config.S3_REGION,
     ...(config.S3_ENDPOINT ? { endpoint: config.S3_ENDPOINT } : {}),
     forcePathStyle: config.S3_FORCE_PATH_STYLE,
     credentials: optionalAwsCredentials(config),
+    // The browser supplies the body after this server signs the request, so the SDK cannot
+    // calculate a payload checksum here. Avoid presigning the checksum of an empty body.
+    requestChecksumCalculation: 'WHEN_REQUIRED',
   });
   const bucket = config.S3_BUCKET;
 
@@ -86,6 +111,9 @@ export function createS3UploadProvider(config: Env): UploadProviderAdapter {
         Key: input.objectKey,
         ContentType: input.contentType,
         ContentLength: input.size,
+        // The same presigned URL remains valid until expiry. Make it a create-only capability so
+        // bytes accepted/scanned under this key cannot be replaced with a second PUT afterwards.
+        IfNoneMatch: '*',
       });
       return {
         method: 'PUT',
@@ -93,6 +121,7 @@ export function createS3UploadProvider(config: Env): UploadProviderAdapter {
         headers: {
           'content-type': input.contentType,
           'content-length': String(input.size),
+          'if-none-match': '*',
         },
         expiresAt,
       };
@@ -100,30 +129,63 @@ export function createS3UploadProvider(config: Env): UploadProviderAdapter {
     async inspectObject(input) {
       const result = await client.send(
         new HeadObjectCommand({ Bucket: bucket, Key: input.objectKey }),
+        { abortSignal: AbortSignal.timeout(config.UPLOAD_PROVIDER_TIMEOUT_MS) },
       );
       return {
         size: result.ContentLength ?? 0,
         contentType: result.ContentType?.split(';', 1)[0]?.trim().toLowerCase(),
         checksum: result.ChecksumSHA256 ?? result.ETag?.replaceAll('"', ''),
-        ...(config.S3_PUBLIC_BASE_URL
-          ? { url: `${trimTrailingSlash(config.S3_PUBLIC_BASE_URL)}/${input.objectKey}` }
-          : {}),
       };
     },
-    async readObject(input) {
+    async readObjectPrefix(input) {
       const result = await client.send(
-        new GetObjectCommand({ Bucket: bucket, Key: input.objectKey }),
+        new GetObjectCommand({
+          Bucket: bucket,
+          Key: input.objectKey,
+          Range: `bytes=0-${Math.max(0, input.maxBytes - 1)}`,
+        }),
+        { abortSignal: AbortSignal.timeout(config.UPLOAD_PROVIDER_TIMEOUT_MS) },
       );
       if (!result.Body) throw errors.notFound('Uploaded object is unavailable');
-      return Buffer.from(await result.Body.transformToByteArray());
+      const bytes = Buffer.from(await result.Body.transformToByteArray());
+      return bytes.subarray(0, input.maxBytes);
     },
     createDownloadUrl(input) {
       return getSignedUrl(client, new GetObjectCommand({ Bucket: bucket, Key: input.objectKey }), {
         expiresIn: config.UPLOAD_URL_TTL_SECONDS,
       });
     },
+    async createDirectDownload(input) {
+      const expiresAt = new Date(Date.now() + input.expiresInSeconds * 1_000);
+      const disposition = `attachment; filename*=UTF-8''${encodeURIComponent(input.filename)}`;
+      const url = await getSignedUrl(
+        client,
+        new GetObjectCommand({
+          Bucket: bucket,
+          Key: input.objectKey,
+          ResponseContentType: input.contentType,
+          ResponseContentDisposition: disposition,
+        }),
+        { expiresIn: input.expiresInSeconds },
+      );
+      return { url, expiresAt };
+    },
+    async openDownload(input) {
+      const result = await client.send(
+        new GetObjectCommand({ Bucket: bucket, Key: input.objectKey }),
+        { abortSignal: AbortSignal.timeout(config.UPLOAD_PROVIDER_TIMEOUT_MS) },
+      );
+      if (!result.Body) throw errors.notFound('Uploaded object is unavailable');
+      return {
+        body: result.Body as unknown as Readable,
+        contentLength: result.ContentLength,
+        contentType: result.ContentType?.split(';', 1)[0]?.trim().toLowerCase(),
+      };
+    },
     async deleteObject(input) {
-      await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: input.objectKey }));
+      await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: input.objectKey }), {
+        abortSignal: AbortSignal.timeout(config.UPLOAD_PROVIDER_TIMEOUT_MS),
+      });
     },
   };
 }
@@ -187,7 +249,7 @@ export function createCloudinaryUploadProvider(config: Env): UploadProviderAdapt
         timestamp,
         overwrite: false,
         unique_filename: false,
-        type: input.visibility === 'PUBLIC' ? 'upload' : 'authenticated',
+        type: 'authenticated',
       } as const;
       const resourceType = cloudinaryResourceType(input.contentType);
       return {
@@ -207,11 +269,12 @@ export function createCloudinaryUploadProvider(config: Env): UploadProviderAdapt
     },
     async inspectObject(input) {
       const resourceType = cloudinaryResourceType(input.contentType);
-      const deliveryType = input.visibility === 'PUBLIC' ? 'upload' : 'authenticated';
+      const deliveryType = 'authenticated';
       const url = `https://api.cloudinary.com/v1_1/${cloudName}/resources/${resourceType}/${deliveryType}/${encodeURIComponent(input.objectKey)}`;
       const value = await cloudinaryJson(url, {
         method: 'GET',
         headers: { authorization: basicAuthorization },
+        signal: AbortSignal.timeout(config.UPLOAD_PROVIDER_TIMEOUT_MS),
       });
       return {
         size: typeof value.bytes === 'number' ? value.bytes : 0,
@@ -222,20 +285,33 @@ export function createCloudinaryUploadProvider(config: Env): UploadProviderAdapt
     async createDownloadUrl(input) {
       const metadata = await this.inspectObject(input);
       if (!metadata.url) throw errors.serviceUnavailable('Cloudinary asset URL is unavailable');
-      return input.visibility === 'PUBLIC'
-        ? metadata.url
-        : signedCloudinaryDeliveryUrl(metadata.url, apiSecret);
+      return signedCloudinaryDeliveryUrl(metadata.url, apiSecret);
     },
-    async readObject(input) {
+    async openDownload(input) {
       const metadata = await this.inspectObject(input);
       if (!metadata.url) throw errors.notFound('Uploaded object is unavailable');
-      const response = await fetch(
-        input.visibility === 'PUBLIC'
-          ? metadata.url
-          : signedCloudinaryDeliveryUrl(metadata.url, apiSecret),
-      );
+      const response = await fetch(signedCloudinaryDeliveryUrl(metadata.url, apiSecret), {
+        signal: AbortSignal.timeout(config.UPLOAD_PROVIDER_TIMEOUT_MS),
+      });
+      if (!response.ok || !response.body) {
+        throw errors.serviceUnavailable('Unable to read uploaded object');
+      }
+      return {
+        body: Readable.fromWeb(response.body),
+        contentLength: Number(response.headers.get('content-length') ?? metadata.size) || undefined,
+        contentType: response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase(),
+      };
+    },
+    async readObjectPrefix(input) {
+      const metadata = await this.inspectObject(input);
+      if (!metadata.url) throw errors.notFound('Uploaded object is unavailable');
+      const response = await fetch(signedCloudinaryDeliveryUrl(metadata.url, apiSecret), {
+        headers: { range: `bytes=0-${Math.max(0, input.maxBytes - 1)}` },
+        signal: AbortSignal.timeout(config.UPLOAD_PROVIDER_TIMEOUT_MS),
+      });
       if (!response.ok) throw errors.serviceUnavailable('Unable to read quarantined upload');
-      return Buffer.from(await response.arrayBuffer());
+      const bytes = Buffer.from(await response.arrayBuffer());
+      return bytes.subarray(0, input.maxBytes);
     },
     async deleteObject(input) {
       const timestamp = Math.floor(Date.now() / 1_000);
@@ -243,7 +319,7 @@ export function createCloudinaryUploadProvider(config: Env): UploadProviderAdapt
       const signed = {
         public_id: input.objectKey,
         timestamp,
-        type: input.visibility === 'PUBLIC' ? 'upload' : 'authenticated',
+        type: 'authenticated',
       };
       const form = new URLSearchParams({
         public_id: input.objectKey,
@@ -255,6 +331,7 @@ export function createCloudinaryUploadProvider(config: Env): UploadProviderAdapt
       await cloudinaryJson(`https://api.cloudinary.com/v1_1/${cloudName}/${resourceType}/destroy`, {
         method: 'POST',
         body: form,
+        signal: AbortSignal.timeout(config.UPLOAD_PROVIDER_TIMEOUT_MS),
       });
     },
   };

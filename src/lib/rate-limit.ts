@@ -3,6 +3,7 @@ import { env } from '#app/config/env.js';
 import { errors } from '#app/lib/errors.js';
 import { hashMetadata } from '#app/lib/crypto.js';
 import { appLogger } from '#app/observability/logger.js';
+import { recordRateLimitRejection } from '#app/observability/metrics.js';
 import { captureException } from '#app/observability/sentry.js';
 
 const incrementScript = `
@@ -81,6 +82,12 @@ export class BoundedRateLimitFallback {
 }
 
 const localFallback = new BoundedRateLimitFallback(env.RATE_LIMIT_FALLBACK_MAX_KEYS);
+
+function recordRejection(scope: string): void {
+  // Counted rather than logged: under a flood, one log line per rejection is itself an outage.
+  recordRateLimitRejection(scope);
+}
+
 let redisFailureCount = 0;
 let redisOutageStartedAt: number | undefined;
 let lastRedisAlertAt: number | undefined;
@@ -150,6 +157,7 @@ export async function enforceRateLimit(
 
     const fallbackResult = localFallback.increment(key, windowSeconds);
     if (fallbackResult.count > limit) {
+      recordRejection(scope);
       throw errors.rateLimited(undefined, fallbackResult.retryAfterSeconds);
     }
     return { ...fallbackResult, limit };
@@ -168,6 +176,7 @@ export async function enforceRateLimit(
     );
   }
   if (count > limit) {
+    recordRejection(scope);
     throw errors.rateLimited(undefined, retryAfterSeconds);
   }
   return { count, limit, retryAfterSeconds };

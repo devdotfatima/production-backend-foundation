@@ -4,7 +4,11 @@ import { errors } from '#app/lib/errors.js';
 import { requireStripe, type StripeClient } from '#app/modules/stripe/stripe.client.js';
 import {
   ensureCustomer,
+  billingOwnerKey,
+  billingOwnerMetadata,
+  getBillingCustomerId,
   getBillingUser,
+  resolveBillingOwner,
   resolvePrice,
   safeRedirectUrl,
 } from '#app/modules/stripe/stripe.shared.js';
@@ -34,6 +38,7 @@ export async function createCheckoutSession(
   stripeClient: StripeClient | null,
 ) {
   const client = requireStripe(stripeClient);
+  const owner = resolveBillingOwner(userId);
   const customerId = await ensureCustomer(userId, stripeClient);
   const { priceId, priceKey } = resolvePrice(input.priceKey);
   const params: Stripe.Checkout.SessionCreateParams = {
@@ -42,7 +47,7 @@ export async function createCheckoutSession(
     line_items: [{ price: priceId, quantity: input.quantity }],
     success_url: safeRedirectUrl(input.successUrl, '/billing/success'),
     cancel_url: safeRedirectUrl(input.cancelUrl, '/billing/cancel'),
-    metadata: { userId, priceKey },
+    metadata: { ...billingOwnerMetadata(owner), priceKey },
   };
 
   if (input.promotionCode) {
@@ -52,13 +57,13 @@ export async function createCheckoutSession(
     params.allow_promotion_codes = true;
   }
   if (input.mode === 'payment') {
-    params.payment_intent_data = { metadata: { userId } };
+    params.payment_intent_data = { metadata: billingOwnerMetadata(owner) };
   } else {
-    params.subscription_data = { metadata: { userId } };
+    params.subscription_data = { metadata: billingOwnerMetadata(owner) };
   }
 
   const session = await client.checkout.sessions.create(params, {
-    idempotencyKey: `checkout:${userId}:${hashMetadata(businessIdempotencyKey)}`,
+    idempotencyKey: `checkout:${billingOwnerKey(owner)}:${hashMetadata(businessIdempotencyKey)}`,
   });
   return {
     id: session.id,
@@ -74,13 +79,15 @@ export async function getCheckoutSession(
   stripeClient: StripeClient | null,
 ) {
   const client = requireStripe(stripeClient);
-  const user = await getBillingUser(userId);
+  const ownerCustomerId = await getBillingCustomerId(userId);
   const session = await client.checkout.sessions.retrieve(sessionId, {
     expand: ['line_items.data.price', 'payment_intent', 'subscription'],
   });
   const metadataUserId = session.metadata?.userId;
   const customerId = typeof session.customer === 'string' ? session.customer : session.customer?.id;
-  if (metadataUserId !== userId && customerId !== user.stripeCustomerId) {
+  // Comparing against the resolved owner's customer keeps organization-paid sessions visible to
+  // every member, without widening access when the user owns billing.
+  if (metadataUserId !== userId && (!ownerCustomerId || customerId !== ownerCustomerId)) {
     throw errors.notFound('Checkout session not found');
   }
   return {

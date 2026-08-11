@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { env } from '#app/config/env.js';
 
 const signatures: Array<{ mime: string; matches: (bytes: Buffer) => boolean }> = [
@@ -35,26 +34,35 @@ export function requiresDocumentCdr(contentType: string): boolean {
   );
 }
 
-export async function scanUploadBytes(input: {
+export async function scanUpload(input: {
   uploadId: string;
   filename: string;
   contentType: string;
-  bytes: Buffer;
+  size: number;
+  checksum?: string;
+  sourceUrl: string;
 }): Promise<{ verdict: 'CLEAN' | 'MALICIOUS'; provider: string; reference?: string }> {
   if (env.UPLOAD_SCAN_MODE === 'disabled') {
     return { verdict: 'CLEAN', provider: 'signature-only' };
   }
   const response = await fetch(env.UPLOAD_SCAN_WEBHOOK_URL, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: {
+      'content-type': 'application/json',
+      ...(env.UPLOAD_SCAN_WEBHOOK_AUTH_TOKEN
+        ? { authorization: `Bearer ${env.UPLOAD_SCAN_WEBHOOK_AUTH_TOKEN}` }
+        : {}),
+    },
     body: JSON.stringify({
       uploadId: input.uploadId,
       filename: input.filename,
       contentType: input.contentType,
-      sha256: createHash('sha256').update(input.bytes).digest('hex'),
-      contentBase64: input.bytes.toString('base64'),
+      size: input.size,
+      checksum: input.checksum,
+      sourceUrl: input.sourceUrl,
       cdrRequired: requiresDocumentCdr(input.contentType),
     }),
+    signal: AbortSignal.timeout(env.UPLOAD_SCAN_TIMEOUT_MS),
   });
   if (!response.ok) throw new Error(`Upload scanner returned HTTP ${response.status}`);
   const result = (await response.json()) as { verdict?: unknown; reference?: unknown };

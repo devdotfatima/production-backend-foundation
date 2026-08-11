@@ -5,13 +5,10 @@ declare global {
     interface Request {
       auth?: AccessClaims;
       permissionEpoch?: number;
+      /** Resolved from `Session.activeOrganizationId`, never from client input. */
+      organizationId?: string;
+      organizationPermissionEpoch?: number;
       idempotencyKey?: string;
-      serviceAuth?: {
-        apiKeyId: string;
-        serviceAccountId: string;
-        permissions: string[];
-        permissionEpoch: number;
-      };
       id: string;
       validated?: {
         body?: unknown;

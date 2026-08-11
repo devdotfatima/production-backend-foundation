@@ -15,6 +15,17 @@ enum UserStatus {
   DISABLED
 }
 
+enum OrganizationStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum MembershipStatus {
+  INVITED
+  ACTIVE
+  SUSPENDED
+}
+
 enum OtpChannel {
   EMAIL
   SMS
@@ -34,6 +45,22 @@ enum NotificationChannel {
   SMS
   PUSH
   INTERNAL
+}
+
+enum NotificationDeliveryStatus {
+  PROCESSING
+  SENT
+  DELIVERED
+  SUPPRESSED
+  BOUNCED
+  COMPLAINED
+  FAILED
+}
+
+enum EmailSuppressionReason {
+  BOUNCE
+  COMPLAINT
+  MANUAL
 }
 
 enum OutboxStatus {
@@ -78,12 +105,38 @@ enum UploadVisibility {
   PUBLIC
 }
 
+enum ConversationType {
+  DIRECT
+  GROUP
+  SUPPORT
+}
+
+enum ParticipantRole {
+  OWNER
+  MEMBER
+}
+
+enum MessageType {
+  TEXT
+  SYSTEM
+  ATTACHMENT
+}
+
+enum ChargeableStatus {
+  OPEN
+  RESERVED
+  CONSUMED
+  EXPIRED
+  CANCELED
+}
+
 model User {
   id               String     @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
   email            String?    @unique
   phone            String?    @unique
   passwordHash     String?
   displayName      String?
+  locale           String     @default("en")
   pendingEmail     String?    @unique
   stripeCustomerId String?    @unique
   permissionEpoch  Int        @default(0)
@@ -95,37 +148,135 @@ model User {
   updatedAt        DateTime   @updatedAt @db.Timestamptz(3)
   deletedAt        DateTime?  @db.Timestamptz(3)
 
-  sessions            Session[]
-  refreshTokens       RefreshToken[]
-  otpChallenges       OtpChallenge[]
-  passwordResetTokens PasswordResetToken[]
-  devices             Device[]
-  socialAccounts      SocialAccount[]
-  stripeSubscriptions StripeSubscription[]
-  stripePayments      StripePayment[]
-  stripeRefunds       StripeRefundOperation[]
-  uploads             Upload[]
+  sessions             Session[]
+  refreshTokens        RefreshToken[]
+  otpChallenges        OtpChallenge[]
+  passwordResetTokens  PasswordResetToken[]
+  devices              Device[]
+  socialAccounts       SocialAccount[]
+  memberships          Membership[]              @relation("OrganizationMemberships")
+  membershipsInvited   Membership[]              @relation("MembershipInviter")
+  invitationsSent      Invitation[]              @relation("InvitationInviter")
+  stripeSubscriptions  StripeSubscription[]
+  stripePayments       StripePayment[]
+  stripeRefunds        StripeRefundOperation[]
+  paymentMethods       PaymentMethod[]
+  conversations        ConversationParticipant[]
+  messages             Message[]
+  uploads              Upload[]
   uploadBandwidthUsage UploadBandwidthUsage[]
-  webhookEndpoints    CustomerWebhookEndpoint[]
-  roles               UserRole[]
-  auditEvents         AuditEvent[]         @relation("AuditActor")
+  roles                UserRole[]
+  auditEvents          AuditEvent[]              @relation("AuditActor")
+  notificationPreferences NotificationPreference[]
+  notificationDeliveries  NotificationDelivery[]
 
   @@index([status, deletedAt])
   @@map("users")
 }
 
+/// A tenant. Absent entirely when TENANCY_MODE=disabled; a single implicit row in `single` mode.
+model Organization {
+  id               String             @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  slug             String             @unique
+  name             String
+  status           OrganizationStatus @default(ACTIVE)
+  /// Bumped when any org-scoped role changes, so one write invalidates every member's cached
+  /// permission decisions instead of an unbounded per-member update.
+  permissionEpoch  Int                @default(0)
+  settings         Json?
+  stripeCustomerId String?            @unique
+  createdAt        DateTime           @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime           @updatedAt @db.Timestamptz(3)
+  deletedAt        DateTime?          @db.Timestamptz(3)
+
+  memberships              Membership[]
+  invitations              Invitation[]
+  roles                    Role[]
+  sessions                 Session[]
+  uploads                  Upload[]
+  uploadBandwidthUsage     UploadBandwidthUsage[]
+  stripeSubscriptions      StripeSubscription[]
+  stripePayments           StripePayment[]
+  stripeRefunds            StripeRefundOperation[]
+  paymentMethods           PaymentMethod[]
+  chargeableItems          ChargeableItem[]
+  conversations            Conversation[]
+  conversationParticipants ConversationParticipant[]
+  messages                 Message[]
+  auditEvents              AuditEvent[]
+  notificationPreferences NotificationPreference[]
+  notificationDeliveries  NotificationDelivery[]
+
+  @@index([status, deletedAt])
+  @@map("organizations")
+}
+
+model Membership {
+  id              String           @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  organizationId  String           @db.Uuid
+  userId          String           @db.Uuid
+  roleId          String           @db.Uuid
+  status          MembershipStatus @default(ACTIVE)
+  invitedByUserId String?          @db.Uuid
+  joinedAt        DateTime?        @db.Timestamptz(3)
+  createdAt       DateTime         @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime         @updatedAt @db.Timestamptz(3)
+  deletedAt       DateTime?        @db.Timestamptz(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User         @relation("OrganizationMemberships", fields: [userId], references: [id], onDelete: Cascade)
+  role         Role         @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  invitedBy    User?        @relation("MembershipInviter", fields: [invitedByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([organizationId, userId])
+  @@index([userId, status, deletedAt])
+  @@index([organizationId, status, deletedAt])
+  @@map("memberships")
+}
+
+model Invitation {
+  id              String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  organizationId  String    @db.Uuid
+  email           String
+  roleId          String    @db.Uuid
+  tokenHash       String    @unique
+  expiresAt       DateTime  @db.Timestamptz(3)
+  acceptedAt      DateTime? @db.Timestamptz(3)
+  revokedAt       DateTime? @db.Timestamptz(3)
+  invitedByUserId String?   @db.Uuid
+  createdAt       DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime  @updatedAt @db.Timestamptz(3)
+  deletedAt       DateTime? @db.Timestamptz(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  role         Role         @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  invitedBy    User?        @relation("InvitationInviter", fields: [invitedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, email])
+  @@index([expiresAt])
+  @@map("invitations")
+}
+
 model Role {
-  id          String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  name        String    @unique
-  description String?
-  isSystem    Boolean   @default(false)
-  createdAt   DateTime  @default(now()) @db.Timestamptz(3)
-  updatedAt   DateTime  @updatedAt @db.Timestamptz(3)
-  deletedAt   DateTime? @db.Timestamptz(3)
+  id             String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  /// Null identifies a global/system role that satisfies a permission check in any scope.
+  /// Global uniqueness of `name` for those rows is enforced by a partial index in the migration,
+  /// because Postgres treats NULLs as distinct within a composite unique constraint.
+  organizationId String?   @db.Uuid
+  name           String
+  description    String?
+  isSystem       Boolean   @default(false)
+  createdAt      DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime  @updatedAt @db.Timestamptz(3)
+  deletedAt      DateTime? @db.Timestamptz(3)
 
-  users       UserRole[]
-  permissions RolePermission[]
+  organization Organization?    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  users        UserRole[]
+  permissions  RolePermission[]
+  memberships  Membership[]
+  invitations  Invitation[]
 
+  @@unique([organizationId, name])
   @@index([deletedAt])
   @@map("roles")
 }
@@ -177,21 +328,25 @@ model RolePermission {
 }
 
 model Session {
-  id           String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  userId       String    @db.Uuid
-  familyId     String    @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  ipHash       String?
-  userAgent    String?
-  expiresAt    DateTime  @db.Timestamptz(3)
-  revokedAt    DateTime? @db.Timestamptz(3)
-  revokeReason String?
-  lastSeenAt   DateTime  @default(now()) @db.Timestamptz(3)
-  createdAt    DateTime  @default(now()) @db.Timestamptz(3)
-  updatedAt    DateTime  @updatedAt @db.Timestamptz(3)
-  deletedAt    DateTime? @db.Timestamptz(3)
+  id                   String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  userId               String    @db.Uuid
+  /// Authoritative tenant for the session. Deliberately server-side state rather than a
+  /// client-supplied header, which would be attacker-controlled.
+  activeOrganizationId String?   @db.Uuid
+  familyId             String    @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  ipHash               String?
+  userAgent            String?
+  expiresAt            DateTime  @db.Timestamptz(3)
+  revokedAt            DateTime? @db.Timestamptz(3)
+  revokeReason         String?
+  lastSeenAt           DateTime  @default(now()) @db.Timestamptz(3)
+  createdAt            DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt            DateTime  @updatedAt @db.Timestamptz(3)
+  deletedAt            DateTime? @db.Timestamptz(3)
 
-  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
-  refreshTokens RefreshToken[]
+  user               User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  activeOrganization Organization?  @relation(fields: [activeOrganizationId], references: [id], onDelete: SetNull)
+  refreshTokens      RefreshToken[]
 
   @@index([userId, revokedAt])
   @@index([familyId])
@@ -307,6 +462,9 @@ model OutboxEvent {
   eventType          String
   channel            NotificationChannel
   payload            Json
+  /// W3C trace-context carrier captured with the business transaction. It reconnects API,
+  /// relay, queue, retry, and worker spans without putting tracing metadata in domain payloads.
+  traceContext       Json?
   dedupeKey          String              @unique
   status             OutboxStatus        @default(PENDING)
   attempts           Int                 @default(0)
@@ -325,6 +483,8 @@ model OutboxEvent {
   updatedAt          DateTime            @updatedAt @db.Timestamptz(3)
   deletedAt          DateTime?           @db.Timestamptz(3)
 
+  delivery NotificationDelivery?
+
   @@index([status, availableAt, createdAt])
   @@index([status, expiresAt])
   @@index([status, claimExpiresAt])
@@ -334,24 +494,91 @@ model OutboxEvent {
   @@map("outbox_events")
 }
 
+model NotificationPreference {
+  id             String              @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  organizationId String?             @db.Uuid
+  userId         String              @db.Uuid
+  /// "global" or the organization UUID; avoids nullable-unique semantics.
+  scopeKey       String
+  channel        NotificationChannel
+  topic          String
+  enabled        Boolean             @default(true)
+  createdAt      DateTime            @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime            @updatedAt @db.Timestamptz(3)
+  deletedAt      DateTime?           @db.Timestamptz(3)
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, scopeKey, channel, topic])
+  @@index([organizationId, userId, channel, deletedAt])
+  @@map("notification_preferences")
+}
+
+model EmailSuppression {
+  id              String                 @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  destinationHash String                 @unique
+  reason          EmailSuppressionReason
+  provider        String?
+  providerEventId String?
+  createdAt       DateTime               @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime               @updatedAt @db.Timestamptz(3)
+  deletedAt       DateTime?              @db.Timestamptz(3)
+
+  @@index([reason, createdAt])
+  @@map("email_suppressions")
+}
+
+model NotificationDelivery {
+  id                String                     @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  organizationId    String?                    @db.Uuid
+  userId            String?                    @db.Uuid
+  outboxEventId     String                     @unique @db.Uuid
+  channel           NotificationChannel
+  destinationHash   String?
+  templateKey       String?
+  provider          String?
+  providerMessageId String?                    @unique
+  status            NotificationDeliveryStatus @default(PROCESSING)
+  attempts          Int                        @default(0)
+  lastError         String?
+  sentAt            DateTime?                  @db.Timestamptz(3)
+  deliveredAt       DateTime?                  @db.Timestamptz(3)
+  createdAt         DateTime                   @default(now()) @db.Timestamptz(3)
+  updatedAt         DateTime                   @updatedAt @db.Timestamptz(3)
+  deletedAt         DateTime?                  @db.Timestamptz(3)
+
+  user         User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  outboxEvent  OutboxEvent   @relation(fields: [outboxEventId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, status, createdAt])
+  @@index([userId, status, createdAt])
+  @@index([destinationHash, createdAt])
+  @@map("notification_deliveries")
+}
+
 model AuditEvent {
-  id          String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  actorUserId String?   @db.Uuid
-  action      String
-  entityType  String
-  entityId    String?
-  requestId   String?
-  ipHash      String?
-  userAgent   String?
-  metadata    Json?
-  integrityHash String
-  integrityVersion Int @default(1)
-  createdAt   DateTime  @default(now()) @db.Timestamptz(3)
-  updatedAt   DateTime  @updatedAt @db.Timestamptz(3)
-  deletedAt   DateTime? @db.Timestamptz(3)
+  id               String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  organizationId   String?   @db.Uuid
+  actorUserId      String?   @db.Uuid
+  action           String
+  entityType       String
+  entityId         String?
+  requestId        String?
+  ipHash           String?
+  userAgent        String?
+  metadata         Json?
+  integrityHash    String
+  integrityVersion Int       @default(1)
+  createdAt        DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime  @updatedAt @db.Timestamptz(3)
+  deletedAt        DateTime? @db.Timestamptz(3)
 
-  actor User? @relation("AuditActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+  actor        User?         @relation("AuditActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Restrict)
 
+  @@index([organizationId, createdAt])
   @@index([actorUserId, createdAt])
   @@index([entityType, entityId, createdAt])
   @@index([createdAt, id])
@@ -379,6 +606,7 @@ model StripeWebhookEvent {
 
 model StripeSubscription {
   id                       String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  organizationId           String?   @db.Uuid
   userId                   String    @db.Uuid
   stripeSubscriptionId     String    @unique
   status                   String
@@ -394,14 +622,17 @@ model StripeSubscription {
   updatedAt                DateTime  @updatedAt @db.Timestamptz(3)
   deletedAt                DateTime? @db.Timestamptz(3)
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Restrict)
 
+  @@index([organizationId, status, deletedAt])
   @@index([userId, status, deletedAt])
   @@map("stripe_subscriptions")
 }
 
 model StripePayment {
   id                       String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  organizationId           String?   @db.Uuid
   userId                   String    @db.Uuid
   stripePaymentIntentId    String?   @unique
   checkoutSessionId        String?   @unique
@@ -416,15 +647,162 @@ model StripePayment {
   updatedAt                DateTime  @updatedAt @db.Timestamptz(3)
   deletedAt                DateTime? @db.Timestamptz(3)
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Restrict)
 
+  @@index([organizationId, status, createdAt])
   @@index([userId, status, createdAt])
   @@map("stripe_payments")
 }
 
+model Conversation {
+  id              String           @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  organizationId  String?          @db.Uuid
+  type            ConversationType
+  title           String?
+  createdByUserId String?          @db.Uuid
+  /// Per-conversation gap-free counter. UUIDv7 is time-ordered but cannot distinguish a gap from
+  /// a pause, which is what reconnect-and-catch-up needs.
+  lastSeq         BigInt           @default(0)
+  lastMessageAt   DateTime?        @db.Timestamptz(3)
+  metadata        Json?
+  /// Deterministic tenant + sorted-user key for DIRECT conversations. Null for group/support
+  /// conversations. The unique constraint closes the find-then-create race across API replicas.
+  directKey       String?          @unique
+  createdAt       DateTime         @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime         @updatedAt @db.Timestamptz(3)
+  deletedAt       DateTime?        @db.Timestamptz(3)
+
+  organization Organization?             @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  participants ConversationParticipant[]
+  messages     Message[]
+
+  @@index([organizationId, lastMessageAt])
+  @@map("conversations")
+}
+
+model ConversationParticipant {
+  id             String          @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  organizationId String?         @db.Uuid
+  conversationId String          @db.Uuid
+  userId         String          @db.Uuid
+  role           ParticipantRole @default(MEMBER)
+  /// Unread count is `conversation.lastSeq - lastReadSeq`; no per-message read rows required.
+  lastReadSeq    BigInt          @default(0)
+  mutedUntil     DateTime?       @db.Timestamptz(3)
+  joinedAt       DateTime        @default(now()) @db.Timestamptz(3)
+  leftAt         DateTime?       @db.Timestamptz(3)
+  createdAt      DateTime        @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime        @updatedAt @db.Timestamptz(3)
+  deletedAt      DateTime?       @db.Timestamptz(3)
+
+  conversation Conversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  @@unique([conversationId, userId])
+  @@index([userId, leftAt, deletedAt])
+  @@map("conversation_participants")
+}
+
+model Message {
+  id              String      @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  organizationId  String?     @db.Uuid
+  conversationId  String      @db.Uuid
+  senderUserId    String?     @db.Uuid
+  seq             BigInt
+  /// Client-generated. Makes a retried send return the original message instead of duplicating
+  /// it — without this, every flaky mobile connection produces double posts.
+  clientMessageId String
+  type            MessageType @default(TEXT)
+  body            String?
+  uploadId        String?     @db.Uuid
+  editedAt        DateTime?   @db.Timestamptz(3)
+  createdAt       DateTime    @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime    @updatedAt @db.Timestamptz(3)
+  deletedAt       DateTime?   @db.Timestamptz(3)
+
+  conversation Conversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       User?         @relation(fields: [senderUserId], references: [id], onDelete: SetNull)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  @@unique([conversationId, seq])
+  @@unique([conversationId, clientMessageId])
+  @@index([conversationId, seq(sort: Desc)])
+  @@map("messages")
+}
+
+/// A saved card. Only Stripe identifiers and display metadata are stored — never a PAN, CVC, or
+/// anything else that would take this service out of PCI SAQ-A.
+model PaymentMethod {
+  id                    String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  organizationId        String?   @db.Uuid
+  userId                String    @db.Uuid
+  stripePaymentMethodId String    @unique
+  type                  String
+  brand                 String?
+  last4                 String?
+  expMonth              Int?
+  expYear               Int?
+  /// Stripe's cross-customer duplicate detector; useful for "you already saved this card".
+  fingerprint           String?
+  isDefault             Boolean   @default(false)
+  /// Recorded at setup so later off-session charges have a mandate to reference.
+  mandateId             String?
+  detachedAt            DateTime? @db.Timestamptz(3)
+  createdAt             DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt             DateTime  @updatedAt @db.Timestamptz(3)
+  deletedAt             DateTime? @db.Timestamptz(3)
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  @@index([organizationId, deletedAt])
+  @@index([userId, deletedAt])
+  @@map("payment_methods")
+}
+
+/// Server-owned amount for a dynamic charge.
+///
+/// The charge API accepts a `reference`, never a price: the amount is resolved here or by a
+/// client project's own `ChargeableResolver`. A request body must never be able to influence
+/// what is charged.
+model ChargeableItem {
+  id              String           @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  organizationId  String?          @db.Uuid
+  userId          String?          @db.Uuid
+  reference       String
+  amount          Int
+  currency        String
+  description     String
+  metadata        Json?
+  status          ChargeableStatus @default(OPEN)
+  /// Hash of the business idempotency key that owns the current reservation. The raw key is
+  /// never persisted. Only the same logical request may resume an interrupted Stripe call.
+  reservationKeyHash String?
+  reservedAt      DateTime?        @db.Timestamptz(3)
+  expiresAt       DateTime?        @db.Timestamptz(3)
+  consumedAt      DateTime?        @db.Timestamptz(3)
+  paymentIntentId String?          @unique
+  createdAt       DateTime         @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime         @updatedAt @db.Timestamptz(3)
+  deletedAt       DateTime?        @db.Timestamptz(3)
+
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  @@unique([organizationId, reference])
+  @@index([organizationId, status, createdAt])
+  @@index([status, reservedAt])
+  @@index([status, expiresAt])
+  @@map("chargeable_items")
+}
+
 model StripeRefundOperation {
   id                 String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  organizationId     String?   @db.Uuid
   userId             String    @db.Uuid
+  /// Stable billing-owner namespace. Organization members share idempotency at the owner level.
+  ownerKey           String
   idempotencyKeyHash String
   requestHash        String
   paymentIntentId    String?
@@ -439,9 +817,11 @@ model StripeRefundOperation {
   createdAt          DateTime  @default(now()) @db.Timestamptz(3)
   updatedAt          DateTime  @updatedAt @db.Timestamptz(3)
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Restrict)
 
-  @@unique([userId, idempotencyKeyHash])
+  @@unique([ownerKey, idempotencyKeyHash])
+  @@index([organizationId, createdAt])
   @@index([userId, createdAt])
   @@index([paymentIntentId])
   @@index([chargeId])
@@ -449,84 +829,60 @@ model StripeRefundOperation {
 }
 
 model Upload {
-  id            String         @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  userId        String         @db.Uuid
-  provider      UploadProvider
-  status        UploadStatus   @default(PENDING)
-  visibility    UploadVisibility @default(PRIVATE)
-  objectKey     String
-  originalName  String
-  contentType   String
-  expectedSize  BigInt
-  actualSize    BigInt?
-  checksum      String?
+  id                  String           @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  organizationId      String?          @db.Uuid
+  userId              String           @db.Uuid
+  provider            UploadProvider
+  status              UploadStatus     @default(PENDING)
+  visibility          UploadVisibility @default(PRIVATE)
+  objectKey           String
+  originalName        String
+  contentType         String
+  expectedSize        BigInt
+  actualSize          BigInt?
+  checksum            String?
   detectedContentType String?
-  scanProvider  String?
-  scanReference String?
-  scanVerdict   String?
-  scannedAt     DateTime?      @db.Timestamptz(3)
-  url           String?
-  uploadExpiresAt DateTime     @db.Timestamptz(3)
-  readyAt       DateTime?      @db.Timestamptz(3)
-  createdAt     DateTime       @default(now()) @db.Timestamptz(3)
-  updatedAt     DateTime       @updatedAt @db.Timestamptz(3)
-  deletedAt     DateTime?      @db.Timestamptz(3)
+  scanProvider        String?
+  scanReference       String?
+  scanVerdict         String?
+  scannedAt           DateTime?        @db.Timestamptz(3)
+  url                 String?
+  uploadExpiresAt     DateTime         @db.Timestamptz(3)
+  readyAt             DateTime?        @db.Timestamptz(3)
+  /// Set only after the asynchronous provider deletion succeeds during erasure/cleanup.
+  storageDeletedAt    DateTime?        @db.Timestamptz(3)
+  createdAt           DateTime         @default(now()) @db.Timestamptz(3)
+  updatedAt           DateTime         @updatedAt @db.Timestamptz(3)
+  deletedAt           DateTime?        @db.Timestamptz(3)
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Restrict)
 
   @@unique([provider, objectKey])
+  @@index([organizationId, status, createdAt])
   @@index([userId, status, createdAt])
   @@index([status, uploadExpiresAt])
   @@map("uploads")
 }
 
 model UploadBandwidthUsage {
-  id          String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  userId      String   @db.Uuid
-  periodStart DateTime @db.Date
-  bytes       BigInt   @default(0)
-  createdAt   DateTime @default(now()) @db.Timestamptz(3)
-  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+  id             String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  organizationId String?  @db.Uuid
+  userId         String   @db.Uuid
+  /// Explicit quota namespace; unlike a nullable composite key, this is conflict-safe globally.
+  scopeKey       String
+  periodStart    DateTime @db.Date
+  bytes          BigInt   @default(0)
+  createdAt      DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime @updatedAt @db.Timestamptz(3)
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Restrict)
 
-  @@unique([userId, periodStart])
+  @@unique([scopeKey, periodStart])
+  @@index([userId, periodStart])
+  @@index([organizationId, periodStart])
   @@map("upload_bandwidth_usage")
-}
-
-model ServiceAccount {
-  id              String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  name            String    @unique
-  permissions     String[]  @default([])
-  permissionEpoch Int       @default(0)
-  active          Boolean   @default(true)
-  createdAt       DateTime  @default(now()) @db.Timestamptz(3)
-  updatedAt       DateTime  @updatedAt @db.Timestamptz(3)
-  deletedAt       DateTime? @db.Timestamptz(3)
-
-  apiKeys ApiKey[]
-
-  @@index([active, deletedAt])
-  @@map("service_accounts")
-}
-
-model ApiKey {
-  id               String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  serviceAccountId String    @db.Uuid
-  name             String
-  prefix           String
-  keyHash          String    @unique
-  expiresAt        DateTime? @db.Timestamptz(3)
-  lastUsedAt       DateTime? @db.Timestamptz(3)
-  revokedAt        DateTime? @db.Timestamptz(3)
-  createdAt        DateTime  @default(now()) @db.Timestamptz(3)
-  updatedAt        DateTime  @updatedAt @db.Timestamptz(3)
-  deletedAt        DateTime? @db.Timestamptz(3)
-
-  serviceAccount ServiceAccount @relation(fields: [serviceAccountId], references: [id], onDelete: Cascade)
-
-  @@index([serviceAccountId, revokedAt, deletedAt])
-  @@map("api_keys")
 }
 
 model IdempotencyRecord {
@@ -537,6 +893,11 @@ model IdempotencyRecord {
   requestHash String
   statusCode  Int?
   response    Json?
+  /// External-side-effect operations use a renewable ownership lease. Database-only operations
+  /// complete the record and mutation in one transaction and leave these fields null.
+  lockToken   String?   @db.Uuid
+  lockedUntil DateTime? @db.Timestamptz(3)
+  attempts    Int       @default(0)
   expiresAt   DateTime  @db.Timestamptz(3)
   createdAt   DateTime  @default(now()) @db.Timestamptz(3)
   updatedAt   DateTime  @updatedAt @db.Timestamptz(3)
@@ -544,44 +905,7 @@ model IdempotencyRecord {
 
   @@unique([actorKey, scope, keyHash])
   @@index([expiresAt])
+  @@index([lockedUntil])
   @@map("idempotency_records")
 }
 
-model CustomerWebhookEndpoint {
-  id              String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  userId          String    @db.Uuid
-  url             String
-  description     String?
-  events          String[]
-  secretEncrypted String
-  active          Boolean   @default(true)
-  createdAt       DateTime  @default(now()) @db.Timestamptz(3)
-  updatedAt       DateTime  @updatedAt @db.Timestamptz(3)
-  deletedAt       DateTime? @db.Timestamptz(3)
-
-  user       User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  deliveries CustomerWebhookDelivery[]
-
-  @@index([userId, active, deletedAt])
-  @@map("customer_webhook_endpoints")
-}
-
-model CustomerWebhookDelivery {
-  id             String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  endpointId     String    @db.Uuid
-  eventId        String    @unique
-  eventType      String
-  payload        Json
-  attempts       Int       @default(0)
-  lastStatusCode Int?
-  lastError      String?
-  deliveredAt    DateTime? @db.Timestamptz(3)
-  createdAt      DateTime  @default(now()) @db.Timestamptz(3)
-  updatedAt      DateTime  @updatedAt @db.Timestamptz(3)
-  deletedAt      DateTime? @db.Timestamptz(3)
-
-  endpoint CustomerWebhookEndpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
-
-  @@index([endpointId, createdAt])
-  @@map("customer_webhook_deliveries")
-}

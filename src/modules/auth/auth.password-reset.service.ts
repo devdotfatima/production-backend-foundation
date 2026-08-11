@@ -14,6 +14,7 @@ import {
 import { prisma } from '#app/lib/prisma.js';
 import { recordInvalidOtpAttempt } from '#app/modules/auth/auth.otp.service.js';
 import { auditMetadata, expiresIn, type RequestMetadata } from '#app/modules/auth/auth.shared.js';
+import { publishChatRevocation } from '#app/modules/chat/chat.revocations.js';
 import { addOutboxEvent } from '#app/modules/outbox/outbox.service.js';
 
 export async function requestPasswordReset(
@@ -163,7 +164,7 @@ export async function confirmPasswordReset(
     return false;
   }
   const passwordHash = await hashSecret(newPassword);
-  return withAuditedTransaction(async (tx, audit) => {
+  const changed = await withAuditedTransaction(async (tx, audit) => {
     const usedAt = new Date();
     const used = await tx.passwordResetToken.updateMany({
       where: {
@@ -207,4 +208,6 @@ export async function confirmPasswordReset(
     });
     return true;
   });
+  if (changed) await publishChatRevocation(reset.userId);
+  return changed;
 }

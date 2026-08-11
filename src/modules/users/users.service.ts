@@ -1,6 +1,6 @@
 import { prisma } from '#app/lib/prisma.js';
 import { deterministicOrder, textSearch } from '#app/middleware/query-options.js';
-import { queueCustomerWebhookEvent } from '#app/modules/customer-webhooks/customer-webhooks.service.js';
+import { publishChatRevocation } from '#app/modules/chat/chat.revocations.js';
 import { withAuditedTransaction } from '#app/lib/audited-transaction.js';
 import { paginateCursor } from '#app/lib/cursor-pagination.js';
 import { assertResourceOwner } from '#app/lib/resource-ownership.js';
@@ -11,6 +11,7 @@ export const publicUserSelect = {
   email: true,
   phone: true,
   displayName: true,
+  locale: true,
   status: true,
   emailVerifiedAt: true,
   phoneVerifiedAt: true,
@@ -84,7 +85,7 @@ export async function unregisterDevice(
 
 export async function updateOwnProfile(
   userId: string,
-  input: { displayName?: string | null; phone?: string | null },
+  input: { displayName?: string | null; phone?: string | null; locale?: string },
   metadata: RequestMetadata,
 ) {
   return withAuditedTransaction(async (tx, audit) => {
@@ -96,6 +97,7 @@ export async function updateOwnProfile(
 
     const data = {
       ...(input.displayName !== undefined ? { displayName: input.displayName } : {}),
+      ...(input.locale !== undefined ? { locale: input.locale } : {}),
       ...(input.phone !== undefined
         ? {
             phone: input.phone,
@@ -115,11 +117,6 @@ export async function updateOwnProfile(
       entityId: userId,
       metadata: { fields: Object.keys(input) },
       ...metadata,
-    });
-    await queueCustomerWebhookEvent(tx, userId, 'user.updated', {
-      userId,
-      fields: Object.keys(input),
-      updatedAt: new Date().toISOString(),
     });
     return updated;
   });
@@ -172,7 +169,7 @@ export async function updateUser(
   actorUserId: string,
   metadata: RequestMetadata,
 ) {
-  return withAuditedTransaction(async (tx, audit) => {
+  const updated = await withAuditedTransaction(async (tx, audit) => {
     const updated = await tx.user.update({ where: { id }, data: input, select: publicUserSelect });
     if (input.status === 'SUSPENDED' || input.status === 'DISABLED') {
       const revokedAt = new Date();
@@ -193,11 +190,10 @@ export async function updateUser(
       metadata: { fields: Object.keys(input) },
       ...metadata,
     });
-    await queueCustomerWebhookEvent(tx, id, 'user.updated', {
-      userId: id,
-      fields: Object.keys(input),
-      updatedAt: new Date().toISOString(),
-    });
     return updated;
   });
+  if (input.status === 'SUSPENDED' || input.status === 'DISABLED') {
+    await publishChatRevocation(id);
+  }
+  return updated;
 }

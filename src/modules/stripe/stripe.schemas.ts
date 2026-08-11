@@ -54,16 +54,52 @@ export const promotionCodeSchema = z.object({
   code: z.string().trim().min(1).max(100),
 });
 
+/**
+ * Note what is absent: no `amount`, no `currency`, no `price`. The server resolves the amount
+ * from `reference` alone — accepting it from the body would make this a free-money endpoint.
+ */
+export const createChargeSchema = z.object({
+  reference: z.string().trim().min(1).max(200),
+  savePaymentMethod: z.boolean().optional(),
+  paymentMethodId: z.uuid().optional(),
+  returnUrl: redirectUrl.optional(),
+});
+
+export const paymentMethodIdParams = z.object({ paymentMethodId: z.uuid() });
+export const paymentIntentIdParams = z.object({
+  paymentIntentId: z.string().trim().min(1).max(255),
+});
+
+export const createChargeRequestValidation = {
+  body: createChargeSchema,
+  headers: checkoutIdempotencyHeadersSchema,
+} as const;
+export const setupIntentRequestValidation = {
+  headers: checkoutIdempotencyHeadersSchema,
+} as const;
+export const paymentMethodIdRequestValidation = {
+  params: paymentMethodIdParams,
+  headers: checkoutIdempotencyHeadersSchema,
+} as const;
+export const paymentIntentIdRequestValidation = { params: paymentIntentIdParams } as const;
+
 export const checkoutRequestValidation = {
   body: checkoutSessionSchema,
   headers: checkoutIdempotencyHeadersSchema,
 } as const;
-export const subscriptionIdRequestValidation = { params: subscriptionIdParams } as const;
+export const subscriptionIdRequestValidation = {
+  params: subscriptionIdParams,
+  headers: checkoutIdempotencyHeadersSchema,
+} as const;
 export const subscriptionChangeRequestValidation = {
   params: subscriptionIdParams,
   body: subscriptionChangeSchema,
+  headers: checkoutIdempotencyHeadersSchema,
 } as const;
-export const billingPortalRequestValidation = { body: billingPortalSchema } as const;
+export const billingPortalRequestValidation = {
+  body: billingPortalSchema,
+  headers: checkoutIdempotencyHeadersSchema,
+} as const;
 export const checkoutSessionRequestValidation = { params: checkoutSessionParams } as const;
 export const refundRequestValidation = { body: refundSchema } as const;
 export const refundHeadersRequestValidation = {

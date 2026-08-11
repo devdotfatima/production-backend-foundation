@@ -24,7 +24,7 @@ const mocks = vi.hoisted(() => {
     prisma: {
       user: { findFirst: vi.fn(), update: vi.fn() },
       stripeRefundOperation: {
-        findUnique: vi.fn(),
+        findFirst: vi.fn(),
         findUniqueOrThrow: vi.fn(),
         create: vi.fn(),
         update: vi.fn(),
@@ -55,7 +55,10 @@ vi.mock('#app/config/env.js', () => ({
     COOKIE_SECRET: 'test-cookie-secret-at-least-32-characters',
   },
 }));
-vi.mock('#app/lib/crypto.js', () => ({ hashMetadata: mocks.hashMetadata }));
+vi.mock('#app/lib/crypto.js', () => ({
+  hashMetadata: mocks.hashMetadata,
+  candidateMetadataHashes: (value: string) => [mocks.hashMetadata(value)],
+}));
 vi.mock('#app/lib/prisma.js', () => ({ prisma: mocks.prisma }));
 vi.mock('#app/modules/outbox/outbox.service.js', () => ({ addOutboxEvent: vi.fn() }));
 
@@ -208,13 +211,13 @@ describe('Stripe service hardening', () => {
       mocks.stripeClient as never,
     );
 
-    expect(mocks.stripeClient.checkout.sessions.create).toHaveBeenCalledWith(
-      expect.objectContaining({
-        line_items: [{ price: 'price_pro', quantity: 2 }],
-        metadata: { userId: 'user-1', priceKey: 'pro' },
-      }),
-      { idempotencyKey: 'checkout:user-1:hashed:order-12345' },
-    );
+    const [params, options] = mocks.stripeClient.checkout.sessions.create.mock.calls[0] as [
+      { line_items?: unknown; metadata?: Record<string, unknown> },
+      { idempotencyKey?: string },
+    ];
+    expect(params.line_items).toEqual([{ price: 'price_pro', quantity: 2 }]);
+    expect(params.metadata).toMatchObject({ userId: 'user-1', priceKey: 'pro' });
+    expect(options.idempotencyKey).toBe('checkout:user:user-1:hashed:order-12345');
   });
 
   it('rejects a price key that is not in the server catalogue', async () => {
@@ -242,7 +245,7 @@ describe('Stripe service hardening', () => {
       status: 'succeeded',
       latest_charge: { amount_refunded: 0 },
     });
-    mocks.prisma.stripeRefundOperation.findUnique.mockResolvedValue(null);
+    mocks.prisma.stripeRefundOperation.findFirst.mockResolvedValue(null);
     mocks.prisma.stripeRefundOperation.create
       .mockResolvedValueOnce({
         id: 'operation-1',
@@ -307,7 +310,7 @@ describe('Stripe service hardening', () => {
   });
 
   it('returns a completed refund operation before re-reading changed Stripe balances', async () => {
-    mocks.prisma.stripeRefundOperation.findUnique.mockResolvedValue({
+    mocks.prisma.stripeRefundOperation.findFirst.mockResolvedValue({
       id: 'operation-1',
       requestHash: 'hashed:refund-request:pi_123::1000',
       stripeRefundId: 're_existing',

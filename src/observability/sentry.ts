@@ -12,7 +12,10 @@ export function initializeSentry(): void {
     dsn: env.SENTRY_DSN || undefined,
     enabled: Boolean(env.SENTRY_DSN),
     environment: env.SENTRY_ENVIRONMENT,
-    tracesSampleRate: env.SENTRY_TRACES_SAMPLE_RATE,
+    // Exactly one SDK may own OpenTelemetry's global provider. When OTLP tracing is enabled,
+    // Sentry remains the error sink while the application OTel SDK owns spans and propagation.
+    skipOpenTelemetrySetup: env.OTEL_ENABLED,
+    tracesSampleRate: env.OTEL_ENABLED ? 0 : env.SENTRY_TRACES_SAMPLE_RATE,
     sendDefaultPii: false,
   });
 }

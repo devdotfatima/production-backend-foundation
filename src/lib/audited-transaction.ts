@@ -34,3 +34,11 @@ export function createAuditedTransaction(
 
 /** Runs a mutation and its audit writes in the same database transaction. */
 export const withAuditedTransaction = createAuditedTransaction(prisma);
+
+/** Reuses an existing transaction while preserving the same audit-writer contract. */
+export function runAuditedMutation<T>(
+  tx: Prisma.TransactionClient,
+  operation: (tx: Prisma.TransactionClient, audit: AuditWriter) => Promise<T>,
+): Promise<T> {
+  return operation(tx, (input) => writeAuditEvent(tx, input));
+}

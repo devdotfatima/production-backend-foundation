@@ -24,7 +24,8 @@
     "prisma/**/*.ts",
     "tests/**/*.ts",
     "eslint.config.js",
-    "vitest.config.ts"
+    "vitest.config.ts",
+    "vitest.integration.config.ts"
   ],
   "exclude": ["dist", "node_modules"]
 }

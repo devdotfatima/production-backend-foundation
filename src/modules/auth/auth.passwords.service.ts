@@ -15,6 +15,7 @@ import {
   type TokenPair,
 } from '#app/modules/auth/auth.shared.js';
 import { createSession } from '#app/modules/auth/auth.sessions.service.js';
+import { publishChatRevocation } from '#app/modules/chat/chat.revocations.js';
 import { addOutboxEvent } from '#app/modules/outbox/outbox.service.js';
 
 const dummyPasswordHash = hashSecret(randomToken());
@@ -141,5 +142,6 @@ export async function changePassword(
       ...auditMetadata(metadata),
     });
   });
+  await publishChatRevocation(userId);
   return true;
 }

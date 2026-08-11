@@ -6,6 +6,7 @@ import { prisma } from '#app/lib/prisma.js';
 import type { RequestMetadata } from '#app/lib/request-metadata.js';
 import { appRedis } from '#app/lib/redis.js';
 import { env } from '#app/config/env.js';
+import { captureTraceContext } from '#app/observability/tracing.js';
 
 export interface OutboxInput {
   aggregateType: string;
@@ -33,6 +34,7 @@ export async function addOutboxEvent(
   tx: Prisma.TransactionClient,
   input: OutboxInput,
 ): Promise<void> {
+  const traceContext = captureTraceContext();
   await tx.outboxEvent.create({
     data: {
       aggregateType: input.aggregateType,
@@ -40,6 +42,7 @@ export async function addOutboxEvent(
       eventType: input.eventType,
       channel: input.channel,
       payload: input.payload,
+      ...(traceContext ? { traceContext } : {}),
       dedupeKey: input.dedupeKey,
       availableAt: input.availableAt,
       expiresAt: input.expiresAt,

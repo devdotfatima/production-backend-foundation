@@ -1,0 +1,5 @@
+{{headline}}
+
+{{message}}
+
+Learn more: {{actionUrl}}

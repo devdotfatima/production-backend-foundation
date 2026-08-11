@@ -7,6 +7,8 @@ import { OUTBOX_MAX_DELIVERY_ATTEMPTS } from '#app/modules/outbox/outbox.policy.
 export interface NotificationJobData {
   outboxId: string;
   generation: number;
+  /** W3C propagation fields; domain payloads remain tracing-agnostic. */
+  traceContext?: Record<string, string>;
 }
 
 export const outboxQueueNames = {

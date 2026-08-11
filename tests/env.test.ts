@@ -26,6 +26,28 @@ describe('environment validation', () => {
     expect(result.UPLOAD_PROVIDER).toBe('disabled');
   });
 
+  it('defaults tenancy to the current single-tenant behavior', () => {
+    expect(parseEnv(validDevelopmentEnv).TENANCY_MODE).toBe('disabled');
+    expect(parseEnv({ ...validDevelopmentEnv, TENANCY_MODE: 'multi' }).TENANCY_MODE).toBe('multi');
+    expect(() => parseEnv({ ...validDevelopmentEnv, TENANCY_MODE: 'sometimes' })).toThrow(
+      /TENANCY_MODE/,
+    );
+  });
+
+  it('defaults the per-IP ceiling and validates the allowlist', () => {
+    expect(parseEnv(validDevelopmentEnv).RATE_LIMIT_IP_PER_MINUTE).toBe(600);
+    expect(parseEnv(validDevelopmentEnv).RATE_LIMIT_ALLOWLIST_CIDRS).toEqual([]);
+    expect(
+      parseEnv({
+        ...validDevelopmentEnv,
+        RATE_LIMIT_ALLOWLIST_CIDRS: '10.0.0.0/8, 2001:db8::/32',
+      }).RATE_LIMIT_ALLOWLIST_CIDRS,
+    ).toEqual(['10.0.0.0/8', '2001:db8::/32']);
+    expect(() =>
+      parseEnv({ ...validDevelopmentEnv, RATE_LIMIT_ALLOWLIST_CIDRS: 'not-an-ip' }),
+    ).toThrow(/RATE_LIMIT_ALLOWLIST_CIDRS/);
+  });
+
   it('rejects short secrets', () => {
     expect(() => parseEnv({ ...validDevelopmentEnv, JWT_ACCESS_SECRET: 'short' })).toThrow(
       /JWT_ACCESS_SECRET/,
@@ -34,20 +56,26 @@ describe('environment validation', () => {
 
   it('fails closed when production providers are missing', () => {
     expect(() => parseEnv({ ...validDevelopmentEnv, NODE_ENV: 'production' })).toThrow(
-      /SENTRY_DSN/,
+      /UPLOAD_SCAN_MODE|COOKIE_SECURE|AUDIT_INTEGRITY_SECRET|EMAIL_PROVIDER/,
     );
   });
 
   it('requires a server-owned price catalogue whenever Stripe is enabled', () => {
     expect(() =>
-      parseEnv({ ...validDevelopmentEnv, STRIPE_SECRET_KEY: 'sk_test_configured' }),
+      parseEnv({
+        ...validDevelopmentEnv,
+        BILLING_ENABLED: 'true',
+        STRIPE_SECRET_KEY: 'sk_test_configured',
+      }),
     ).toThrow(/STRIPE_PRICE_CATALOG/);
   });
 
   it('parses catalogue keys and requires the default key to exist', () => {
     const result = parseEnv({
       ...validDevelopmentEnv,
+      BILLING_ENABLED: 'true',
       STRIPE_SECRET_KEY: 'sk_test_configured',
+      STRIPE_WEBHOOK_SECRET: 'whsec_configured',
       STRIPE_PRICE_CATALOG: '{"starter":"price_123","pro":"price_456"}',
       STRIPE_DEFAULT_PRICE_KEY: 'starter',
     });
@@ -56,7 +84,9 @@ describe('environment validation', () => {
     expect(() =>
       parseEnv({
         ...validDevelopmentEnv,
+        BILLING_ENABLED: 'true',
         STRIPE_SECRET_KEY: 'sk_test_configured',
+        STRIPE_WEBHOOK_SECRET: 'whsec_configured',
         STRIPE_PRICE_CATALOG: '{"starter":"price_123"}',
         STRIPE_DEFAULT_PRICE_KEY: 'missing',
       }),

@@ -16,6 +16,11 @@ export const updateUserSchema = z.object({
 });
 export const updateOwnProfileSchema = z.object({
   displayName: z.string().trim().min(1).max(100).nullable().optional(),
+  locale: z
+    .string()
+    .trim()
+    .regex(/^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/, 'Locale must be a valid BCP 47 tag')
+    .optional(),
   phone: z
     .string()
     .regex(/^\+[1-9]\d{7,14}$/, 'Phone must be in E.164 format')

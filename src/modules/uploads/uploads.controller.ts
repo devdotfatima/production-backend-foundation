@@ -1,4 +1,5 @@
 import type { RequestHandler } from 'express';
+import { pipeline } from 'node:stream/promises';
 import { sendSuccess } from '#app/lib/api-response.js';
 import { requestMetadata } from '#app/lib/request-metadata.js';
 import { getValidated } from '#app/middleware/request-validation.js';
@@ -51,9 +52,20 @@ export function createUploadsController(provider: UploadProviderAdapter | null) 
 
   const download: RequestHandler = async (request, response) => {
     const { params } = getValidated(request, uploadIdRequestValidation);
-    sendSuccess(request, response, {
-      data: await createUploadDownload(request.auth!.userId, params.uploadId, provider),
-    });
+    const result = await createUploadDownload(request.auth!.userId, params.uploadId, provider);
+    response.setHeader('Cache-Control', 'private, no-store');
+    if (result.delivery === 'redirect') {
+      response.redirect(307, result.url);
+      return;
+    }
+    response.status(200);
+    response.setHeader('Content-Type', result.contentType);
+    response.setHeader('Content-Length', String(result.contentLength));
+    response.setHeader(
+      'Content-Disposition',
+      `attachment; filename*=UTF-8''${encodeURIComponent(result.filename)}`,
+    );
+    await pipeline(result.body, response);
   };
 
   const remove: RequestHandler = async (request, response) => {

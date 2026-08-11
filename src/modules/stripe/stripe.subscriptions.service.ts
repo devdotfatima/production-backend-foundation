@@ -1,8 +1,12 @@
 import { errors } from '#app/lib/errors.js';
+import { hashMetadata } from '#app/lib/crypto.js';
 import { prisma } from '#app/lib/prisma.js';
 import { requireStripe, type StripeClient } from '#app/modules/stripe/stripe.client.js';
 import {
+  billingOwnerMetadata,
+  billingOwnerKey,
   ensureCustomer,
+  resolveBillingOwner,
   resolvePrice,
   safeRedirectUrl,
 } from '#app/modules/stripe/stripe.shared.js';
@@ -52,6 +56,7 @@ export async function cancelSubscription(
   userId: string,
   subscriptionId: string,
   stripeClient: StripeClient | null,
+  businessIdempotencyKey: string,
 ): Promise<{
   id: string;
   status: string;
@@ -64,7 +69,13 @@ export async function cancelSubscription(
   const subscriptionCustomerId =
     typeof subscription.customer === 'string' ? subscription.customer : subscription.customer.id;
   if (subscriptionCustomerId !== customerId) throw errors.notFound('Subscription not found');
-  const updated = await client.subscriptions.update(subscriptionId, { cancel_at_period_end: true });
+  const updated = await client.subscriptions.update(
+    subscriptionId,
+    { cancel_at_period_end: true },
+    {
+      idempotencyKey: `subscription-cancel:${billingOwnerKey(resolveBillingOwner(userId))}:${hashMetadata(businessIdempotencyKey)}`,
+    },
+  );
   return {
     id: updated.id,
     status: updated.status,
@@ -77,6 +88,7 @@ export async function resumeSubscription(
   userId: string,
   subscriptionId: string,
   stripeClient: StripeClient | null,
+  businessIdempotencyKey: string,
 ): Promise<{ id: string; status: string; cancelAtPeriodEnd: boolean }> {
   const client = requireStripe(stripeClient);
   const customerId = await ensureCustomer(userId, stripeClient);
@@ -84,9 +96,13 @@ export async function resumeSubscription(
   const owner =
     typeof subscription.customer === 'string' ? subscription.customer : subscription.customer.id;
   if (owner !== customerId) throw errors.notFound('Subscription not found');
-  const updated = await client.subscriptions.update(subscriptionId, {
-    cancel_at_period_end: false,
-  });
+  const updated = await client.subscriptions.update(
+    subscriptionId,
+    { cancel_at_period_end: false },
+    {
+      idempotencyKey: `subscription-resume:${billingOwnerKey(resolveBillingOwner(userId))}:${hashMetadata(businessIdempotencyKey)}`,
+    },
+  );
   return {
     id: updated.id,
     status: updated.status,
@@ -99,8 +115,10 @@ export async function changeSubscriptionPrice(
   subscriptionId: string,
   input: { priceKey: string; prorationBehavior: 'always_invoice' | 'create_prorations' | 'none' },
   stripeClient: StripeClient | null,
+  businessIdempotencyKey: string,
 ): Promise<{ id: string; status: string; priceId: string | null; cancelAtPeriodEnd: boolean }> {
   const client = requireStripe(stripeClient);
+  const billingOwner = resolveBillingOwner(userId);
   const customerId = await ensureCustomer(userId, stripeClient);
   const subscription = await client.subscriptions.retrieve(subscriptionId);
   const owner =
@@ -109,12 +127,18 @@ export async function changeSubscriptionPrice(
   const item = subscription.items.data[0];
   if (!item) throw errors.conflict('Subscription has no changeable item');
   const { priceId, priceKey } = resolvePrice(input.priceKey);
-  const updated = await client.subscriptions.update(subscriptionId, {
-    items: [{ id: item.id, price: priceId }],
-    proration_behavior: input.prorationBehavior,
-    cancel_at_period_end: false,
-    metadata: { ...subscription.metadata, userId, priceKey },
-  });
+  const updated = await client.subscriptions.update(
+    subscriptionId,
+    {
+      items: [{ id: item.id, price: priceId }],
+      proration_behavior: input.prorationBehavior,
+      cancel_at_period_end: false,
+      metadata: { ...subscription.metadata, ...billingOwnerMetadata(billingOwner), priceKey },
+    },
+    {
+      idempotencyKey: `subscription-change:${billingOwnerKey(billingOwner)}:${hashMetadata(businessIdempotencyKey)}`,
+    },
+  );
   return {
     id: updated.id,
     status: updated.status,
@@ -127,32 +151,33 @@ export async function createBillingPortalSession(
   userId: string,
   returnUrl: string | undefined,
   stripeClient: StripeClient | null,
+  businessIdempotencyKey: string,
 ) {
   const client = requireStripe(stripeClient);
   const customer = await ensureCustomer(userId, stripeClient);
-  const session = await client.billingPortal.sessions.create({
-    customer,
-    return_url: safeRedirectUrl(returnUrl, '/billing'),
-  });
+  const owner = resolveBillingOwner(userId);
+  const session = await client.billingPortal.sessions.create(
+    {
+      customer,
+      return_url: safeRedirectUrl(returnUrl, '/billing'),
+    },
+    {
+      idempotencyKey: `billing-portal:${billingOwnerKey(owner)}:${hashMetadata(businessIdempotencyKey)}`,
+    },
+  );
   return { id: session.id, url: session.url };
 }
 
 /** Immediately terminates every non-terminal subscription before account erasure. */
-export async function cancelAllUserSubscriptions(
-  userId: string,
-  stripeClient: StripeClient | null,
+export async function cancelCustomerSubscriptions(
+  stripeCustomerId: string,
+  stripeClient: StripeClient,
 ): Promise<number> {
-  if (!stripeClient) return 0;
-  const user = await prisma.user.findFirst({
-    where: { id: userId, deletedAt: null },
-    select: { stripeCustomerId: true },
-  });
-  if (!user?.stripeCustomerId) return 0;
   let startingAfter: string | undefined;
   let canceled = 0;
   do {
     const page = await stripeClient.subscriptions.list({
-      customer: user.stripeCustomerId,
+      customer: stripeCustomerId,
       status: 'all',
       limit: 100,
       ...(startingAfter ? { starting_after: startingAfter } : {}),
@@ -169,4 +194,17 @@ export async function cancelAllUserSubscriptions(
     startingAfter = page.has_more ? page.data.at(-1)?.id : undefined;
   } while (startingAfter);
   return canceled;
+}
+
+export async function cancelAllUserSubscriptions(
+  userId: string,
+  stripeClient: StripeClient | null,
+): Promise<number> {
+  if (!stripeClient) return 0;
+  const user = await prisma.user.findFirst({
+    where: { id: userId, deletedAt: null },
+    select: { stripeCustomerId: true },
+  });
+  if (!user?.stripeCustomerId) return 0;
+  return cancelCustomerSubscriptions(user.stripeCustomerId, stripeClient);
 }

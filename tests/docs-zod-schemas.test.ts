@@ -6,9 +6,18 @@ describe('Zod-derived OpenAPI components', () => {
     const schemas = JSON.stringify(openApiDocument.components.schemas);
 
     expect(schemas).toContain('SignupRequest');
+    expect(schemas).toContain('EmailChangeRequest');
     expect(schemas).toContain('"minLength":12');
     expect(schemas).toContain('"maxLength":4096');
     expect(schemas).toContain('"maximum":100');
+  });
+
+  it('publishes the hardened lifecycle routes and reusable idempotency contract', () => {
+    expect(openApiDocument.paths).toHaveProperty('/api/v1/auth/email-change/request');
+    expect(openApiDocument.paths).toHaveProperty(
+      '/api/v1/billing/subscriptions/{subscriptionId}/resume',
+    );
+    expect(openApiDocument.components.parameters).toHaveProperty('IdempotencyKey');
   });
 
   it('embeds schemas as OpenAPI components without nested dialect declarations', () => {

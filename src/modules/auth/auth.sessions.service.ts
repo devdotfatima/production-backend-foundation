@@ -15,6 +15,8 @@ import {
   type RequestMetadata,
   type TokenPair,
 } from '#app/modules/auth/auth.shared.js';
+import { resolveInitialOrganizationId } from '#app/modules/organizations/organizations.tenancy.js';
+import { publishChatRevocation } from '#app/modules/chat/chat.revocations.js';
 
 export async function createSession(userId: string, metadata: RequestMetadata): Promise<TokenPair> {
   const refreshToken = randomToken();
@@ -24,6 +26,7 @@ export async function createSession(userId: string, metadata: RequestMetadata): 
     const created = await tx.session.create({
       data: {
         userId,
+        activeOrganizationId: await resolveInitialOrganizationId(tx, userId),
         ipHash: hashMetadata(metadata.ip),
         userAgent: metadata.userAgent?.slice(0, 500),
         expiresAt,
@@ -101,7 +104,7 @@ export async function rotateRefreshToken(
           entityId: current.sessionId,
           ...auditMetadata(metadata),
         });
-        return { status: 'REUSE' } as const;
+        return { status: 'REUSE', userId: current.userId } as const;
       }
 
       const next = await tx.refreshToken.create({
@@ -125,7 +128,7 @@ export async function rotateRefreshToken(
           where: { sessionId: current.sessionId, revokedAt: null },
           data: { revokedAt: now },
         });
-        return { status: 'REUSE' } as const;
+        return { status: 'REUSE', userId: current.userId } as const;
       }
       await tx.session.update({ where: { id: current.sessionId }, data: { lastSeenAt: now } });
       return { status: 'ROTATED', userId: current.userId, sessionId: current.sessionId } as const;
@@ -133,7 +136,10 @@ export async function rotateRefreshToken(
     { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
   );
 
-  if (result.status !== 'ROTATED') return null;
+  if (result.status !== 'ROTATED') {
+    if (result.status === 'REUSE') await publishChatRevocation(result.userId);
+    return null;
+  }
   return {
     accessToken: await signAccessToken({ userId: result.userId, sessionId: result.sessionId }),
     refreshToken: nextRawToken,
@@ -162,6 +168,7 @@ export async function revokeSession(
       ...auditMetadata(metadata),
     });
   });
+  await publishChatRevocation(userId);
 }
 
 export async function revokeAllSessions(userId: string, metadata: RequestMetadata): Promise<void> {
@@ -182,4 +189,5 @@ export async function revokeAllSessions(userId: string, metadata: RequestMetadat
       ...auditMetadata(metadata),
     });
   });
+  await publishChatRevocation(userId);
 }

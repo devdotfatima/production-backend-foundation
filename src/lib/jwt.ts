@@ -5,6 +5,12 @@ const secret = new TextEncoder().encode(env.JWT_ACCESS_SECRET);
 const issuer = 'backend-foundation';
 const audience = 'backend-foundation-api';
 
+/**
+ * The active organization is deliberately absent. `authenticate` reads the session on every
+ * request regardless, so a token claim would add a second source of truth that can diverge from
+ * `Session.activeOrganizationId` after an organization switch — silently acting in the wrong
+ * tenant. The session row is authoritative.
+ */
 export interface AccessClaims {
   userId: string;
   sessionId: string;

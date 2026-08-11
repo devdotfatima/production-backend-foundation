@@ -10,6 +10,17 @@ const jsonResponse = {
   },
 };
 
+const binaryDownloadResponse = {
+  description: 'Authenticated file stream',
+  headers: {
+    'Content-Disposition': { schema: { type: 'string' } },
+    'Content-Length': { schema: { type: 'integer' } },
+  },
+  content: {
+    'application/octet-stream': { schema: { type: 'string', format: 'binary' } },
+  },
+};
+
 const authenticatedOperation = {
   security: [{ cookieAuth: [] }],
 };
@@ -21,6 +32,8 @@ const csrfOperation = {
 const protectedMutation = {
   security: [{ cookieAuth: [], csrfToken: [] }],
 };
+
+const idempotencyParameter = { $ref: '#/components/parameters/IdempotencyKey' };
 
 const cursorParameters = [
   { name: 'cursor', in: 'query', schema: { type: 'string' } },
@@ -56,6 +69,7 @@ export const openApiDocument = {
     { name: 'Auth' },
     { name: 'Users' },
     { name: 'Roles' },
+    { name: 'Organizations' },
     { name: 'Audit' },
     { name: 'Outbox' },
     { name: 'Billing' },
@@ -182,6 +196,24 @@ export const openApiDocument = {
         responses: { '202': jsonResponse, '401': jsonResponse },
       },
     },
+    '/api/v1/auth/email-change/request': {
+      post: {
+        ...protectedMutation,
+        tags: ['Auth'],
+        summary: 'Reauthenticate and send an OTP to a new email address',
+        requestBody: requestBody({ $ref: '#/components/schemas/EmailChangeRequest' }),
+        responses: { '202': jsonResponse, '400': jsonResponse, '401': jsonResponse },
+      },
+    },
+    '/api/v1/auth/email-change/verify': {
+      post: {
+        ...protectedMutation,
+        tags: ['Auth'],
+        summary: 'Verify an email change and revoke every existing session',
+        requestBody: requestBody({ $ref: '#/components/schemas/EmailChangeVerifyRequest' }),
+        responses: { '200': jsonResponse, '400': jsonResponse, '401': jsonResponse },
+      },
+    },
     '/api/v1/auth/logout': {
       post: {
         ...protectedMutation,
@@ -275,7 +307,29 @@ export const openApiDocument = {
         ...authenticatedOperation,
         tags: ['Users'],
         summary: 'List users (administrative)',
-        parameters: cursorParameters,
+        parameters: [
+          ...cursorParameters,
+          { name: 'search', in: 'query', schema: { type: 'string', maxLength: 200 } },
+          {
+            name: 'status',
+            in: 'query',
+            schema: { type: 'string', enum: ['PENDING', 'ACTIVE', 'SUSPENDED', 'DISABLED'] },
+          },
+          {
+            name: 'sort',
+            in: 'query',
+            schema: {
+              type: 'string',
+              enum: ['createdAt', 'email', 'displayName', 'id'],
+              default: 'createdAt',
+            },
+          },
+          {
+            name: 'order',
+            in: 'query',
+            schema: { type: 'string', enum: ['asc', 'desc'], default: 'desc' },
+          },
+        ],
         responses: { '200': jsonResponse, '403': jsonResponse },
       },
     },
@@ -286,6 +340,196 @@ export const openApiDocument = {
         summary: 'Update a user (administrative)',
         parameters: [{ $ref: '#/components/parameters/UserId' }],
         requestBody: requestBody({ $ref: '#/components/schemas/AdminUserUpdateRequest' }),
+        responses: { '200': jsonResponse, '403': jsonResponse, '404': jsonResponse },
+      },
+    },
+    '/api/v1/billing/setup-intents': {
+      post: {
+        ...protectedMutation,
+        tags: ['Billing'],
+        summary: 'Start saving a card',
+        description:
+          'Returns a client secret for Stripe Elements. Card data never reaches this server, which is what keeps the deployment in PCI SAQ-A. The SetupIntent is created with usage=off_session so later off-session charges have a mandate to reference.',
+        parameters: [idempotencyParameter],
+        responses: { '201': jsonResponse, '401': jsonResponse },
+      },
+    },
+    '/api/v1/billing/payment-methods': {
+      get: {
+        ...authenticatedOperation,
+        tags: ['Billing'],
+        summary: 'List saved cards',
+        description:
+          'Returns Stripe identifiers and display metadata only — never a PAN, CVC, or full expiry.',
+        responses: { '200': jsonResponse, '401': jsonResponse },
+      },
+    },
+    '/api/v1/billing/payment-methods/{paymentMethodId}': {
+      delete: {
+        ...protectedMutation,
+        tags: ['Billing'],
+        summary: 'Remove a saved card',
+        description:
+          'Refuses to remove the last card while a subscription is active, because the next renewal would fail silently.',
+        parameters: [{ $ref: '#/components/parameters/PaymentMethodId' }, idempotencyParameter],
+        responses: { '200': jsonResponse, '404': jsonResponse, '409': jsonResponse },
+      },
+    },
+    '/api/v1/billing/payment-methods/{paymentMethodId}/default': {
+      post: {
+        ...protectedMutation,
+        tags: ['Billing'],
+        summary: 'Set the default card',
+        parameters: [{ $ref: '#/components/parameters/PaymentMethodId' }, idempotencyParameter],
+        responses: { '200': jsonResponse, '404': jsonResponse },
+      },
+    },
+    '/api/v1/billing/charges': {
+      post: {
+        ...protectedMutation,
+        tags: ['Billing'],
+        summary: 'Charge a dynamic amount',
+        description:
+          'The body carries a reference, never an amount: the server resolves what that reference costs and rejects anything outside the configured per-currency bounds. Supply paymentMethodId to charge a saved card off-session. A response with requiresAction=true is a 3D Secure challenge, not a decline — complete it with the returned clientSecret.',
+        parameters: [idempotencyParameter],
+        requestBody: requestBody({ $ref: '#/components/schemas/CreateChargeRequest' }),
+        responses: {
+          '201': jsonResponse,
+          '400': jsonResponse,
+          '404': jsonResponse,
+          '409': jsonResponse,
+        },
+      },
+    },
+    '/api/v1/billing/charges/{paymentIntentId}': {
+      get: {
+        ...authenticatedOperation,
+        tags: ['Billing'],
+        summary: 'Get a charge',
+        parameters: [{ $ref: '#/components/parameters/PaymentIntentId' }],
+        responses: { '200': jsonResponse, '404': jsonResponse },
+      },
+    },
+    '/api/v1/organizations': {
+      get: {
+        ...authenticatedOperation,
+        tags: ['Organizations'],
+        summary: "List the caller's organizations",
+        responses: { '200': jsonResponse, '401': jsonResponse },
+      },
+      post: {
+        ...protectedMutation,
+        tags: ['Organizations'],
+        summary: 'Create an organization (TENANCY_MODE=multi only)',
+        requestBody: requestBody({ $ref: '#/components/schemas/CreateOrganizationRequest' }),
+        responses: { '201': jsonResponse, '401': jsonResponse, '409': jsonResponse },
+      },
+    },
+    '/api/v1/organizations/{organizationId}/switch': {
+      post: {
+        ...protectedMutation,
+        tags: ['Organizations'],
+        summary: 'Change the active organization for the current session',
+        description:
+          'Requires an active membership. The active organization is stored on the session; it is never read from a request header.',
+        parameters: [{ $ref: '#/components/parameters/OrganizationId' }],
+        responses: { '200': jsonResponse, '401': jsonResponse, '403': jsonResponse },
+      },
+    },
+    '/api/v1/organizations/invitations/accept': {
+      post: {
+        ...protectedMutation,
+        tags: ['Organizations'],
+        summary: 'Accept an invitation',
+        description:
+          "The authenticated account's verified email must match the invited address, so a leaked invitation link cannot be redeemed by another account.",
+        requestBody: requestBody({ $ref: '#/components/schemas/AcceptInvitationRequest' }),
+        responses: { '200': jsonResponse, '403': jsonResponse, '404': jsonResponse },
+      },
+    },
+    '/api/v1/organizations/{organizationId}': {
+      get: {
+        ...authenticatedOperation,
+        tags: ['Organizations'],
+        summary: 'Get an organization',
+        description:
+          'The path organization must be the active one; switch first. A platform-wide grant is not sufficient.',
+        parameters: [{ $ref: '#/components/parameters/OrganizationId' }],
+        responses: { '200': jsonResponse, '403': jsonResponse, '404': jsonResponse },
+      },
+      patch: {
+        ...protectedMutation,
+        tags: ['Organizations'],
+        summary: 'Update an organization',
+        parameters: [{ $ref: '#/components/parameters/OrganizationId' }],
+        requestBody: requestBody({ $ref: '#/components/schemas/UpdateOrganizationRequest' }),
+        responses: { '200': jsonResponse, '403': jsonResponse, '404': jsonResponse },
+      },
+    },
+    '/api/v1/organizations/{organizationId}/members': {
+      get: {
+        ...authenticatedOperation,
+        tags: ['Organizations'],
+        summary: 'List organization members',
+        parameters: [{ $ref: '#/components/parameters/OrganizationId' }, ...cursorParameters],
+        responses: { '200': jsonResponse, '403': jsonResponse },
+      },
+    },
+    '/api/v1/organizations/{organizationId}/members/{userId}': {
+      patch: {
+        ...protectedMutation,
+        tags: ['Organizations'],
+        summary: "Change a member's role",
+        parameters: [
+          { $ref: '#/components/parameters/OrganizationId' },
+          { $ref: '#/components/parameters/MemberUserId' },
+        ],
+        requestBody: requestBody({ $ref: '#/components/schemas/ChangeMemberRoleRequest' }),
+        responses: {
+          '200': jsonResponse,
+          '400': jsonResponse,
+          '403': jsonResponse,
+          '404': jsonResponse,
+        },
+      },
+      delete: {
+        ...protectedMutation,
+        tags: ['Organizations'],
+        summary: 'Remove a member',
+        description:
+          'Refuses to remove the last active member. Detaches the removed member’s sessions from the organization immediately.',
+        parameters: [
+          { $ref: '#/components/parameters/OrganizationId' },
+          { $ref: '#/components/parameters/MemberUserId' },
+        ],
+        responses: {
+          '200': jsonResponse,
+          '403': jsonResponse,
+          '404': jsonResponse,
+          '409': jsonResponse,
+        },
+      },
+    },
+    '/api/v1/organizations/{organizationId}/invitations': {
+      post: {
+        ...protectedMutation,
+        tags: ['Organizations'],
+        summary: 'Invite a member',
+        description: 'The invitation token is returned once and only its hash is stored.',
+        parameters: [{ $ref: '#/components/parameters/OrganizationId' }],
+        requestBody: requestBody({ $ref: '#/components/schemas/CreateInvitationRequest' }),
+        responses: { '201': jsonResponse, '400': jsonResponse, '403': jsonResponse },
+      },
+    },
+    '/api/v1/organizations/{organizationId}/invitations/{invitationId}': {
+      delete: {
+        ...protectedMutation,
+        tags: ['Organizations'],
+        summary: 'Revoke an invitation',
+        parameters: [
+          { $ref: '#/components/parameters/OrganizationId' },
+          { $ref: '#/components/parameters/InvitationId' },
+        ],
         responses: { '200': jsonResponse, '403': jsonResponse, '404': jsonResponse },
       },
     },
@@ -304,6 +548,21 @@ export const openApiDocument = {
         responses: { '201': jsonResponse, '403': jsonResponse },
       },
     },
+    '/api/v1/roles/{id}/permissions': {
+      patch: {
+        ...protectedMutation,
+        tags: ['Roles'],
+        summary: "Replace a role's permission set",
+        parameters: [{ $ref: '#/components/parameters/RoleId' }],
+        requestBody: requestBody({ $ref: '#/components/schemas/RolePermissionsUpdateRequest' }),
+        responses: {
+          '200': jsonResponse,
+          '400': jsonResponse,
+          '403': jsonResponse,
+          '404': jsonResponse,
+        },
+      },
+    },
     '/api/v1/roles/assignments': {
       post: {
         ...protectedMutation,
@@ -311,6 +570,26 @@ export const openApiDocument = {
         summary: 'Assign a role to a user',
         requestBody: requestBody({ $ref: '#/components/schemas/RoleAssignmentRequest' }),
         responses: { '201': jsonResponse, '403': jsonResponse },
+      },
+      delete: {
+        ...protectedMutation,
+        tags: ['Roles'],
+        summary: 'Revoke a role from a user',
+        parameters: [
+          {
+            name: 'userId',
+            in: 'query',
+            required: true,
+            schema: { type: 'string', format: 'uuid' },
+          },
+          {
+            name: 'roleId',
+            in: 'query',
+            required: true,
+            schema: { type: 'string', format: 'uuid' },
+          },
+        ],
+        responses: { '200': jsonResponse, '403': jsonResponse, '404': jsonResponse },
       },
     },
     '/api/v1/audit-events': {
@@ -349,14 +628,7 @@ export const openApiDocument = {
         ...protectedMutation,
         tags: ['Billing'],
         summary: 'Create a one-time payment or subscription Checkout session',
-        parameters: [
-          {
-            name: 'Idempotency-Key',
-            in: 'header',
-            required: true,
-            schema: { type: 'string', minLength: 8, maxLength: 200 },
-          },
-        ],
+        parameters: [idempotencyParameter],
         requestBody: requestBody({ $ref: '#/components/schemas/CheckoutRequest' }),
         responses: { '201': jsonResponse, '400': jsonResponse, '503': jsonResponse },
       },
@@ -386,8 +658,44 @@ export const openApiDocument = {
         summary: 'Cancel a subscription at period end',
         parameters: [
           { name: 'subscriptionId', in: 'path', required: true, schema: { type: 'string' } },
+          idempotencyParameter,
         ],
         responses: { '200': jsonResponse, '404': jsonResponse },
+      },
+    },
+    '/api/v1/billing/subscriptions/{subscriptionId}/resume': {
+      post: {
+        ...protectedMutation,
+        tags: ['Billing'],
+        summary: 'Resume a subscription scheduled for cancellation',
+        parameters: [
+          { name: 'subscriptionId', in: 'path', required: true, schema: { type: 'string' } },
+          idempotencyParameter,
+        ],
+        responses: { '200': jsonResponse, '404': jsonResponse },
+      },
+    },
+    '/api/v1/billing/subscriptions/{subscriptionId}': {
+      patch: {
+        ...protectedMutation,
+        tags: ['Billing'],
+        summary: 'Upgrade or downgrade a subscription using a server-owned price key',
+        parameters: [
+          { name: 'subscriptionId', in: 'path', required: true, schema: { type: 'string' } },
+          idempotencyParameter,
+        ],
+        requestBody: requestBody({ $ref: '#/components/schemas/SubscriptionChangeRequest' }),
+        responses: { '200': jsonResponse, '400': jsonResponse, '404': jsonResponse },
+      },
+    },
+    '/api/v1/billing/portal/sessions': {
+      post: {
+        ...protectedMutation,
+        tags: ['Billing'],
+        summary: 'Create a short-lived Stripe Billing Portal session',
+        parameters: [idempotencyParameter],
+        requestBody: requestBody({ $ref: '#/components/schemas/BillingPortalRequest' }),
+        responses: { '201': jsonResponse, '400': jsonResponse, '503': jsonResponse },
       },
     },
     '/api/v1/billing/payments': {
@@ -404,15 +712,7 @@ export const openApiDocument = {
         ...protectedMutation,
         tags: ['Billing'],
         summary: 'Refund an owned payment or charge',
-        parameters: [
-          {
-            name: 'Idempotency-Key',
-            in: 'header',
-            required: true,
-            description: 'Use a new business operation ID for each intended refund.',
-            schema: { type: 'string', minLength: 8, maxLength: 200 },
-          },
-        ],
+        parameters: [idempotencyParameter],
         requestBody: requestBody({ $ref: '#/components/schemas/RefundRequest' }),
         responses: { '201': jsonResponse, '403': jsonResponse, '404': jsonResponse },
       },
@@ -446,7 +746,7 @@ export const openApiDocument = {
       post: {
         ...protectedMutation,
         tags: ['Uploads'],
-        summary: 'Verify and complete a direct upload',
+        summary: 'Verify, quarantine, and enqueue scanning for a direct upload',
         parameters: [{ $ref: '#/components/parameters/UploadId' }],
         responses: { '200': jsonResponse, '400': jsonResponse, '404': jsonResponse },
       },
@@ -455,9 +755,9 @@ export const openApiDocument = {
       get: {
         ...authenticatedOperation,
         tags: ['Uploads'],
-        summary: 'Create an owned download URL',
+        summary: 'Stream an authorized upload while accounting for bandwidth',
         parameters: [{ $ref: '#/components/parameters/UploadId' }],
-        responses: { '200': jsonResponse, '404': jsonResponse },
+        responses: { '200': binaryDownloadResponse, '404': jsonResponse },
       },
     },
     '/api/v1/uploads/{uploadId}': {
@@ -514,6 +814,42 @@ export const openApiDocument = {
         required: true,
         schema: { type: 'string', format: 'uuid' },
       },
+      RoleId: {
+        name: 'id',
+        in: 'path',
+        required: true,
+        schema: { type: 'string', format: 'uuid' },
+      },
+      PaymentMethodId: {
+        name: 'paymentMethodId',
+        in: 'path',
+        required: true,
+        schema: { type: 'string', format: 'uuid' },
+      },
+      PaymentIntentId: {
+        name: 'paymentIntentId',
+        in: 'path',
+        required: true,
+        schema: { type: 'string' },
+      },
+      OrganizationId: {
+        name: 'organizationId',
+        in: 'path',
+        required: true,
+        schema: { type: 'string', format: 'uuid' },
+      },
+      MemberUserId: {
+        name: 'userId',
+        in: 'path',
+        required: true,
+        schema: { type: 'string', format: 'uuid' },
+      },
+      InvitationId: {
+        name: 'invitationId',
+        in: 'path',
+        required: true,
+        schema: { type: 'string', format: 'uuid' },
+      },
       OutboxEventId: {
         name: 'id',
         in: 'path',
@@ -525,6 +861,14 @@ export const openApiDocument = {
         in: 'path',
         required: true,
         schema: { type: 'string', format: 'uuid' },
+      },
+      IdempotencyKey: {
+        name: 'Idempotency-Key',
+        in: 'header',
+        required: true,
+        description:
+          'Stable business-operation key. Reuse with the same payload replays the encrypted stored response; reuse with another payload returns 409.',
+        schema: { type: 'string', minLength: 8, maxLength: 200 },
       },
     },
     schemas: {

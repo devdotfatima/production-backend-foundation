@@ -1,0 +1,85 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`email template rendering > renders auth-password-reset-otp from its example payload 1`] = `
+{
+  "html": "<p>
+  Your password reset code is <strong>719204</strong>. It expires in 5 minutes.
+</p>
+",
+  "subject": "Your password reset code",
+  "text": "Your password reset code is 719204. It expires in 5 minutes.
+",
+  "transactional": true,
+}
+`;
+
+exports[`email template rendering > renders auth-signup-existing from its example payload 1`] = `
+{
+  "html": "<p>Someone attempted to sign up using this email. Your existing account was not changed.</p>
+",
+  "subject": "A signup was requested for your account",
+  "text": "Someone attempted to sign up using this email. Your existing account was not changed.
+",
+  "transactional": true,
+}
+`;
+
+exports[`email template rendering > renders auth-verification-otp from its example payload 1`] = `
+{
+  "html": "<p>
+  Your verification code is <strong>482913</strong>. It expires in 5 minutes.
+</p>
+",
+  "subject": "Your verification code",
+  "text": "Your verification code is 482913. It expires in 5 minutes.
+",
+  "transactional": true,
+}
+`;
+
+exports[`email template rendering > renders organization-invitation from its example payload 1`] = `
+{
+  "html": "<!doctype html>
+<html lang="en">
+  <body>
+    <p>You have been invited to join <strong>Acme, Inc.</strong>.</p>
+    <p><a href="https://app.example.com/invitations/accept?token=example">Accept invitation</a></p>
+    <p>
+      This invitation expires in 7 days. If you were not expecting it, you can
+      ignore this email.
+    </p>
+  </body>
+</html>
+",
+  "subject": "You have been invited to Acme, Inc.",
+  "text": "You have been invited to join Acme, Inc..
+
+Accept the invitation: https://app.example.com/invitations/accept?token=example
+
+This invitation expires in 7 days. If you were not expecting it, you can ignore this email.
+",
+  "transactional": true,
+}
+`;
+
+exports[`email template rendering > renders product-announcement from its example payload 1`] = `
+{
+  "html": "<!doctype html>
+<html lang="en">
+  <body>
+    <h1>A faster workspace is here</h1>
+    <p>We improved search and made large projects load more quickly.</p>
+    <p><a href="https://app.example.com/updates">Learn more</a></p>
+  </body>
+</html>
+",
+  "subject": "A faster workspace is here",
+  "text": "A faster workspace is here
+
+We improved search and made large projects load more quickly.
+
+Learn more: https://app.example.com/updates
+",
+  "transactional": false,
+}
+`;

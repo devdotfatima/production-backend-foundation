@@ -113,3 +113,6 @@ export const changePasswordRequestValidation = { body: changePasswordSchema } as
 export const accountDeleteRequestValidation = { body: accountDeleteSchema } as const;
 export const emailChangeRequestValidation = { body: emailChangeRequestSchema } as const;
 export const emailChangeVerifyRequestValidation = { body: emailChangeVerifySchema } as const;
+export const refreshRequestValidation = {
+  body: z.object({ refreshToken: z.string().min(1).optional() }),
+} as const;

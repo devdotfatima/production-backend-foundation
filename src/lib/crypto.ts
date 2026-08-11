@@ -105,6 +105,14 @@ export function hashMetadata(value: string): string {
   return versionedHmac(activeKeyId, 'metadata', value);
 }
 
+/** All metadata hashes accepted during rotation, including the pre-HKDF legacy format. */
+export function candidateMetadataHashes(value: string): string[] {
+  return [
+    ...Object.keys(cryptoKeyring).map((keyId) => versionedHmac(keyId, 'metadata', value)),
+    createHmac('sha256', env.TOKEN_HASH_SECRET).update(value).digest('base64url'),
+  ];
+}
+
 export async function hashSecret(value: string): Promise<string> {
   return argon2.hash(value, argonOptions);
 }

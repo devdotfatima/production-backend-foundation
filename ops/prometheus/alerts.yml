@@ -1,0 +1,87 @@
+groups:
+  - name: backend-foundation-slos
+    rules:
+      - alert: BackendMetricsTargetDown
+        expr: up{job=~"backend-api|backend-worker"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: '{{ $labels.job }} metrics target is down'
+          description: 'Prometheus has been unable to scrape the target for five minutes.'
+
+      - alert: BackendHttpErrorBudgetBurn
+        expr: |
+          sum(rate(http_requests_total{status_code=~"5.."}[5m]))
+          /
+          clamp_min(sum(rate(http_requests_total[5m])), 0.001)
+          > 0.01
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'HTTP 5xx rate exceeds 1%'
+          description: 'The API is consuming the default 99% availability error budget.'
+
+      - alert: BackendHttpP95LatencyHigh
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(http_request_duration_seconds_bucket[5m]))
+          ) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'HTTP p95 latency exceeds one second'
+          description: 'Sustained request latency is above the template default SLO.'
+
+      - alert: BackendQueueLagHigh
+        expr: queue_oldest_waiting_job_age_seconds > 300
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Queue {{ $labels.queue }} is more than five minutes behind'
+          description: 'Scale or investigate the worker before retries compound the backlog.'
+
+      - alert: BackendWorkerFailureRateHigh
+        expr: |
+          sum by (queue) (rate(worker_jobs_total{outcome="failed"}[10m]))
+          /
+          clamp_min(sum by (queue) (rate(worker_jobs_total[10m])), 0.001)
+          > 0.10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Worker failures exceed 10% for {{ $labels.queue }}'
+          description: 'Provider, payload, or downstream failures are elevated.'
+
+      - alert: BackendOutboxDeadLettersPresent
+        expr: outbox_dead_letter_count > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Outbox dead letters exist for {{ $labels.channel }}'
+          description: 'Permanent delivery failures require an audited review and redrive.'
+
+      # Keep this threshold aligned with SCHEDULER_STALE_AFTER_HOURS. The repository default is 36h.
+      - alert: BackendScheduledJobStale
+        expr: scheduler_last_run_timestamp_seconds == 0 or (time() - scheduler_last_run_timestamp_seconds > 129600)
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Scheduled job {{ $labels.job }} has not completed recently'
+          description: 'No completion has been recorded within the configured staleness window.'
+
+      - alert: BackendScheduledJobFailed
+        expr: scheduler_last_run_success == 0 and scheduler_last_run_timestamp_seconds > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'The latest {{ $labels.job }} run failed'
+          description: 'Inspect worker logs and rerun through the audited scheduler endpoint.'

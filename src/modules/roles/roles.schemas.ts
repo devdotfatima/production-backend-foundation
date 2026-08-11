@@ -13,5 +13,15 @@ export const roleSchema = z.object({
 
 export const assignmentSchema = z.object({ userId: z.uuid(), roleId: z.uuid() });
 
+export const roleIdParams = z.object({ id: z.uuid() });
+export const updateRolePermissionsSchema = z.object({
+  permissions: z.array(z.string().min(1).max(100)).max(100),
+});
+
 export const createRoleRequestValidation = { body: roleSchema } as const;
 export const assignRoleRequestValidation = { body: assignmentSchema } as const;
+export const revokeRoleRequestValidation = { query: assignmentSchema } as const;
+export const updateRolePermissionsRequestValidation = {
+  params: roleIdParams,
+  body: updateRolePermissionsSchema,
+} as const;

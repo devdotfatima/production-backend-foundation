@@ -37,6 +37,7 @@ function claimedEvent(id: string, generation = 0): OutboxEvent {
     eventType: 'auth.otp',
     channel: 'EMAIL',
     payload: {},
+    traceContext: null,
     dedupeKey: `dedupe-${id}`,
     status: 'CLAIMED',
     attempts: 0,

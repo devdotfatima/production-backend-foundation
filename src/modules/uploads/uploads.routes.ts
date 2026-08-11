@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { authenticate } from '#app/middleware/access-control.js';
-import { userIdentityRateLimit } from '#app/middleware/rate-limit.js';
+import { ipRateLimit, userIdentityRateLimit } from '#app/middleware/rate-limit.js';
 import { validateRequest } from '#app/middleware/request-validation.js';
 import { createUploadsController } from '#app/modules/uploads/uploads.controller.js';
 import type { UploadProviderAdapter } from '#app/modules/uploads/uploads.provider.js';
@@ -16,6 +16,9 @@ export function createUploadsRouter(provider: UploadProviderAdapter | null) {
 
   router.post(
     '/',
+    // Ahead of authenticate so presign floods cannot spend token-verification and storage
+    // budget by rotating accounts from one host.
+    ipRateLimit('uploads:create:ip', 120, 60),
     authenticate,
     userIdentityRateLimit,
     validateRequest(createUploadRequestValidation),

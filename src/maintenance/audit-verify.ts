@@ -1,36 +1,14 @@
 import '#app/instrument.js';
 import { prisma } from '#app/lib/prisma.js';
-import { verifyAuditEvent } from '#app/modules/audit/audit.integrity.js';
+import { withoutTenantScope } from '#app/lib/request-context.js';
+import { verifyAuditIntegrity } from '#app/maintenance/audit-verify.job.js';
 import { appLogger } from '#app/observability/logger.js';
 import { captureException, flushSentry } from '#app/observability/sentry.js';
 
-const BATCH_SIZE = 500;
-
-async function verifyStoredAuditEvents() {
-  let cursor: string | undefined;
-  let signed = 0;
-  let unsigned = 0;
-  let invalid = 0;
-
-  while (true) {
-    const events = await prisma.auditEvent.findMany({
-      take: BATCH_SIZE,
-      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
-      orderBy: { id: 'asc' },
-    });
-    for (const event of events) {
-      if (!event.integrityHash) unsigned += 1;
-      else if (verifyAuditEvent(event)) signed += 1;
-      else invalid += 1;
-    }
-    if (events.length < BATCH_SIZE) break;
-    cursor = events.at(-1)?.id;
-  }
-  return { signed, unsigned, invalid };
-}
-
+// Standalone entrypoint for deployments using external cron. The scheduled-job path calls the
+// same handler, so the two cannot drift.
 try {
-  const result = await verifyStoredAuditEvents();
+  const result = await withoutTenantScope('audit-integrity-verification', verifyAuditIntegrity);
   if (result.invalid > 0 || result.unsigned > 0) {
     process.exitCode = 1;
     appLogger.error(result, 'Audit integrity verification failed');

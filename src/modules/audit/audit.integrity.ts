@@ -3,6 +3,7 @@ import { env } from '#app/config/env.js';
 
 export interface AuditIntegrityRecord {
   id: string;
+  organizationId?: string | null;
   actorUserId?: string | null;
   action: string;
   entityType: string;
@@ -32,8 +33,12 @@ export function signAuditEvent(record: AuditIntegrityRecord, secret = env.AUDIT_
   // Production requires a dedicated audit key. The cookie key is only a development/test
   // fallback so even non-production databases never contain unsigned rows.
   const signingSecret = secret || env.COOKIE_SECRET;
+  const version = record.integrityVersion ?? 1;
   const payload = canonicalJson({
-    version: record.integrityVersion ?? 1,
+    version,
+    // Version 2 brings tenant attribution under the signature. Version 1 rows keep their
+    // original payload shape so previously signed history still verifies.
+    ...(version >= 2 ? { organizationId: record.organizationId ?? null } : {}),
     id: record.id,
     actorUserId: record.actorUserId ?? null,
     action: record.action,

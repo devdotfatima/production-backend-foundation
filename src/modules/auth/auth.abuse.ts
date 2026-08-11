@@ -1,3 +1,4 @@
+import { clientIpKey } from '#app/lib/client-ip.js';
 import { enforceRateLimit } from '#app/lib/rate-limit.js';
 import type { RequestMetadata } from '#app/lib/request-metadata.js';
 
@@ -34,7 +35,13 @@ export async function enforceAuthBackstops(
 ): Promise<void> {
   const value = policy[endpoint];
   await Promise.all([
-    enforceRateLimit(`auth:${endpoint}:ip`, metadata.ip, value.ipLimit, value.window, failClosed),
+    enforceRateLimit(
+      `auth:${endpoint}:ip`,
+      clientIpKey(metadata.ip),
+      value.ipLimit,
+      value.window,
+      failClosed,
+    ),
     enforceRateLimit(`auth:${endpoint}:global`, 'all', value.globalLimit, value.window, {
       ...failClosed,
       alertAtRatio: 0.8,

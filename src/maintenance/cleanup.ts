@@ -1,5 +1,6 @@
 import '#app/instrument.js';
 import { prisma } from '#app/lib/prisma.js';
+import { withoutTenantScope } from '#app/lib/request-context.js';
 import { runRetentionCleanup } from '#app/maintenance/retention.js';
 import { expirePendingUploads } from '#app/maintenance/upload-cleanup.js';
 import { createUploadProvider } from '#app/modules/uploads/uploads.provider.js';
@@ -8,11 +9,14 @@ import { appLogger } from '#app/observability/logger.js';
 import { captureException, flushSentry } from '#app/observability/sentry.js';
 
 try {
-  const expiredUploads = await expirePendingUploads(prisma, createUploadProvider(env), {
-    batchSize: env.RETENTION_BATCH_SIZE,
+  // Retention spans every tenant by definition.
+  await withoutTenantScope('retention-cleanup', async () => {
+    const expiredUploads = await expirePendingUploads(prisma, createUploadProvider(env), {
+      batchSize: env.RETENTION_BATCH_SIZE,
+    });
+    const result = await runRetentionCleanup();
+    appLogger.info({ ...result, expiredUploads }, 'Retention cleanup completed');
   });
-  const result = await runRetentionCleanup();
-  appLogger.info({ ...result, expiredUploads }, 'Retention cleanup completed');
 } catch (error) {
   process.exitCode = 1;
   appLogger.fatal({ err: error }, 'Retention cleanup failed');

@@ -6,7 +6,7 @@ export type UploadCleanupDatabase = Pick<PrismaClient, 'upload'>;
 export async function expirePendingUploads(
   database: UploadCleanupDatabase,
   provider: UploadProviderAdapter | null,
-  options: { now?: Date; batchSize?: number } = {},
+  options: { now?: Date; batchSize?: number; signal?: AbortSignal } = {},
 ) {
   if (!provider) return { expired: 0, failures: 0 };
   const now = options.now ?? new Date();
@@ -16,6 +16,7 @@ export async function expirePendingUploads(
   let failures = 0;
 
   while (true) {
+    options.signal?.throwIfAborted();
     const uploads = await database.upload.findMany({
       where: {
         provider: provider.kind,
@@ -29,6 +30,7 @@ export async function expirePendingUploads(
       select: { id: true, objectKey: true, contentType: true },
     });
     for (const upload of uploads) {
+      options.signal?.throwIfAborted();
       try {
         await provider.deleteObject({
           objectKey: upload.objectKey,

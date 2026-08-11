@@ -16,85 +16,85 @@ import {
   accountDeleteRequestValidation,
   emailChangeRequestValidation,
   emailChangeVerifyRequestValidation,
+  refreshRequestValidation,
 } from '#app/modules/auth/auth.schemas.js';
-import {
-  changePassword,
-  confirmReset,
-  deleteAccount,
-  issueCsrf,
-  login,
-  logout,
-  logoutAll,
-  refresh,
-  requestOtp,
-  requestPhoneVerification,
-  requestReset,
-  socialLogin,
-  verifyPasswordResetOtp,
-  signup,
-  verifyOtpCode,
-  requestEmailChange,
-  verifyEmailChange,
-} from '#app/modules/auth/auth.controller.js';
+import { createAuthController } from '#app/modules/auth/auth.controller.js';
 
-export const authRouter = Router();
+export type AuthController = ReturnType<typeof createAuthController>;
 
-authRouter.get('/csrf', issueCsrf);
-authRouter.post('/signup', validateRequest(signupRequestValidation), signup);
-authRouter.post('/login', validateRequest(loginRequestValidation), login);
-authRouter.post('/oauth/:provider', validateRequest(socialLoginRequestValidation), socialLogin);
-authRouter.post('/otp/send', validateRequest(otpSendRequestValidation), requestOtp);
-authRouter.post(
-  '/phone/send-verification',
-  authenticate,
-  userIdentityRateLimit,
-  validateRequest(phoneVerificationRequestValidation),
-  requestPhoneVerification,
-);
-authRouter.post('/otp/verify', validateRequest(otpVerifyRequestValidation), verifyOtpCode);
-authRouter.post('/refresh', refreshUserRateLimit, refresh);
-authRouter.post(
-  '/password-reset/request',
-  validateRequest(passwordResetRequestValidation),
-  requestReset,
-);
-authRouter.post(
-  '/password-reset/verify-otp',
-  validateRequest(passwordResetVerifyOtpRequestValidation),
-  verifyPasswordResetOtp,
-);
-authRouter.post(
-  '/password-reset/confirm',
-  validateRequest(passwordResetConfirmRequestValidation),
-  confirmReset,
-);
-authRouter.post('/logout', authenticate, userIdentityRateLimit, logout);
-authRouter.post('/logout-all', authenticate, userIdentityRateLimit, logoutAll);
-authRouter.post(
-  '/password/change',
-  authenticate,
-  userIdentityRateLimit,
-  validateRequest(changePasswordRequestValidation),
-  changePassword,
-);
-authRouter.post(
-  '/email-change/request',
-  authenticate,
-  userIdentityRateLimit,
-  validateRequest(emailChangeRequestValidation),
-  requestEmailChange,
-);
-authRouter.post(
-  '/email-change/verify',
-  authenticate,
-  userIdentityRateLimit,
-  validateRequest(emailChangeVerifyRequestValidation),
-  verifyEmailChange,
-);
-authRouter.delete(
-  '/account',
-  authenticate,
-  userIdentityRateLimit,
-  validateRequest(accountDeleteRequestValidation),
-  deleteAccount,
-);
+export function createAuthRouter(controller: AuthController = createAuthController()) {
+  const router = Router();
+
+  router.get('/csrf', controller.issueCsrf);
+  router.post('/signup', validateRequest(signupRequestValidation), controller.signup);
+  router.post('/login', validateRequest(loginRequestValidation), controller.login);
+  router.post(
+    '/oauth/:provider',
+    validateRequest(socialLoginRequestValidation),
+    controller.socialLogin,
+  );
+  router.post('/otp/send', validateRequest(otpSendRequestValidation), controller.requestOtp);
+  router.post(
+    '/phone/send-verification',
+    authenticate,
+    userIdentityRateLimit,
+    validateRequest(phoneVerificationRequestValidation),
+    controller.requestPhoneVerification,
+  );
+  router.post('/otp/verify', validateRequest(otpVerifyRequestValidation), controller.verifyOtpCode);
+  router.post(
+    '/refresh',
+    refreshUserRateLimit,
+    validateRequest(refreshRequestValidation),
+    controller.refresh,
+  );
+  router.post(
+    '/password-reset/request',
+    validateRequest(passwordResetRequestValidation),
+    controller.requestReset,
+  );
+  router.post(
+    '/password-reset/verify-otp',
+    validateRequest(passwordResetVerifyOtpRequestValidation),
+    controller.verifyPasswordResetOtp,
+  );
+  router.post(
+    '/password-reset/confirm',
+    validateRequest(passwordResetConfirmRequestValidation),
+    controller.confirmReset,
+  );
+  router.post('/logout', authenticate, userIdentityRateLimit, controller.logout);
+  router.post('/logout-all', authenticate, userIdentityRateLimit, controller.logoutAll);
+  router.post(
+    '/password/change',
+    authenticate,
+    userIdentityRateLimit,
+    validateRequest(changePasswordRequestValidation),
+    controller.changePassword,
+  );
+  router.post(
+    '/email-change/request',
+    authenticate,
+    userIdentityRateLimit,
+    validateRequest(emailChangeRequestValidation),
+    controller.requestEmailChange,
+  );
+  router.post(
+    '/email-change/verify',
+    authenticate,
+    userIdentityRateLimit,
+    validateRequest(emailChangeVerifyRequestValidation),
+    controller.verifyEmailChange,
+  );
+  router.delete(
+    '/account',
+    authenticate,
+    userIdentityRateLimit,
+    validateRequest(accountDeleteRequestValidation),
+    controller.deleteAccount,
+  );
+
+  return router;
+}
+
+export const authRouter = createAuthRouter();

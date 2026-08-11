@@ -8,32 +8,39 @@ interface RouterLayer {
   handle?: { stack?: { route?: { path: string | string[] } }[] };
 }
 
-function hasMountedRoute(app: Express, mountPath: string, routePath: string): boolean {
-  const layers = (app as unknown as { router: { stack: RouterLayer[] } }).router.stack;
-  return layers.some(
-    (layer) =>
-      layer.name === 'router' &&
-      layer.matchers.some((match) => Boolean(match(mountPath))) &&
-      layer.handle?.stack?.some((child) =>
-        Array.isArray(child.route?.path)
-          ? child.route.path.includes(routePath)
-          : child.route?.path === routePath,
-      ),
+function layerNames(app: Express): string[] {
+  return (app as unknown as { router: { stack: RouterLayer[] } }).router.stack.map(
+    (layer) => layer.name,
   );
 }
 
-describe('optional application modules', () => {
-  it('does not expose billing or upload routes when those modules are disabled', () => {
-    const app = buildApp({ modules: { billing: false, uploads: false } });
+function webhookMountIndex(app: Express): number {
+  return (app as unknown as { router: { stack: RouterLayer[] } }).router.stack.findIndex(
+    (layer) =>
+      layer.name === 'router' &&
+      layer.matchers.some((match) => Boolean(match('/api/v1/webhooks/email-events'))),
+  );
+}
 
-    expect(hasMountedRoute(app, '/api/v1/billing', '/payments')).toBe(false);
-    expect(hasMountedRoute(app, '/api/v1/uploads', '/')).toBe(false);
+describe('global IP rate-limit placement', () => {
+  it('mounts the ceiling so that ordinary traffic passes through it', () => {
+    const app = buildApp();
+    expect(layerNames(app)).toContain('ipRateLimitHandler');
   });
 
-  it('keeps enabled feature routes mounted', () => {
-    const app = buildApp({ modules: { billing: true, uploads: true } });
+  it('leaves inbound webhook receivers above the ceiling', () => {
+    // Throttling a provider's retries would corrupt state (billing, delivery tracking, etc.), so
+    // the exemption is structural: webhook routers must be reached before the limiter runs. The
+    // Stripe webhook router is mounted the same way when BILLING_ENABLED=true; email-events is
+    // exercised here because it is unconditional.
+    const app = buildApp();
+    const names = layerNames(app);
 
-    expect(hasMountedRoute(app, '/api/v1/billing', '/payments')).toBe(true);
-    expect(hasMountedRoute(app, '/api/v1/uploads', '/')).toBe(true);
+    const webhookIndex = webhookMountIndex(app);
+    const limiterIndex = names.indexOf('ipRateLimitHandler');
+
+    expect(webhookIndex).toBeGreaterThanOrEqual(0);
+    expect(limiterIndex).toBeGreaterThanOrEqual(0);
+    expect(webhookIndex).toBeLessThan(limiterIndex);
   });
 });

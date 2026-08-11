@@ -2,12 +2,20 @@ import { Prisma } from '@prisma/client';
 import type Stripe from 'stripe';
 import { env } from '#app/config/env.js';
 import { withAuditedTransaction } from '#app/lib/audited-transaction.js';
-import { hashMetadata } from '#app/lib/crypto.js';
+import { candidateMetadataHashes, hashMetadata } from '#app/lib/crypto.js';
 import { errors } from '#app/lib/errors.js';
 import { prisma } from '#app/lib/prisma.js';
 import type { RequestMetadata } from '#app/lib/request-metadata.js';
 import { requireStripe, type StripeClient } from '#app/modules/stripe/stripe.client.js';
-import { ensureCustomer, getBillingUser } from '#app/modules/stripe/stripe.shared.js';
+import {
+  billingOwnerData,
+  billingOwnerKey,
+  billingOwnerMetadata,
+  billingOwnerWhere,
+  ensureCustomer,
+  getBillingUser,
+  resolveBillingOwner,
+} from '#app/modules/stripe/stripe.shared.js';
 
 type RefundInput = { paymentIntentId?: string; chargeId?: string; amount?: number };
 
@@ -69,14 +77,21 @@ export async function createRefund(
   stripeClient: StripeClient | null,
 ) {
   const client = requireStripe(stripeClient);
-  const idempotencyKeyHash = hashMetadata(`refund-operation:${businessIdempotencyKey}`);
-  const requestHash = hashMetadata(
-    `refund-request:${input.paymentIntentId ?? ''}:${input.chargeId ?? ''}:${input.amount ?? 'full'}`,
-  );
-  let operation = await prisma.stripeRefundOperation.findUnique({
-    where: { userId_idempotencyKeyHash: { userId, idempotencyKeyHash } },
+  const owner = resolveBillingOwner(userId);
+  const ownerKey = billingOwnerKey(owner);
+  const idempotencyInput = `refund-operation:${businessIdempotencyKey}`;
+  const requestInput = `refund-request:${input.paymentIntentId ?? ''}:${input.chargeId ?? ''}:${input.amount ?? 'full'}`;
+  const idempotencyKeyHash = hashMetadata(idempotencyInput);
+  const requestHash = hashMetadata(requestInput);
+  const requestHashCandidates = candidateMetadataHashes(requestInput);
+  let operation = await prisma.stripeRefundOperation.findFirst({
+    where: {
+      ownerKey,
+      ...billingOwnerWhere(owner),
+      idempotencyKeyHash: { in: candidateMetadataHashes(idempotencyInput) },
+    },
   });
-  if (operation && operation.requestHash !== requestHash) {
+  if (operation && !requestHashCandidates.includes(operation.requestHash)) {
     throw errors.conflict('Idempotency-Key was already used for a different refund request');
   }
   if (operation?.stripeRefundId) {
@@ -112,7 +127,8 @@ export async function createRefund(
     try {
       operation = await prisma.stripeRefundOperation.create({
         data: {
-          userId,
+          ...billingOwnerData(owner),
+          ownerKey,
           idempotencyKeyHash,
           requestHash,
           paymentIntentId: input.paymentIntentId,
@@ -125,11 +141,14 @@ export async function createRefund(
         throw error;
       }
       operation = await prisma.stripeRefundOperation.findUniqueOrThrow({
-        where: { userId_idempotencyKeyHash: { userId, idempotencyKeyHash } },
+        where: {
+          ownerKey_idempotencyKeyHash: { ownerKey, idempotencyKeyHash },
+          ...billingOwnerWhere(owner),
+        },
       });
     }
   }
-  if (operation.requestHash !== requestHash) {
+  if (!requestHashCandidates.includes(operation.requestHash)) {
     throw errors.conflict('Idempotency-Key was already used for a different refund request');
   }
   if (operation.stripeRefundId) {
@@ -149,14 +168,14 @@ export async function createRefund(
           : { charge: input.chargeId }),
         amount,
         reason: 'requested_by_customer',
-        metadata: { userId, refundOperationId: operation.id },
+        metadata: { ...billingOwnerMetadata(owner), refundOperationId: operation.id },
       },
-      { idempotencyKey: `refund:${userId}:${idempotencyKeyHash}` },
+      { idempotencyKey: `refund:${ownerKey}:${idempotencyKeyHash}` },
     );
   } catch (error) {
     const message = error instanceof Error ? error.message.slice(0, 2_000) : 'Stripe refund failed';
     await prisma.stripeRefundOperation.update({
-      where: { id: operation.id },
+      where: { id: operation.id, ...billingOwnerWhere(owner) },
       data: { status: 'FAILED', lastError: message },
     });
     throw error;
@@ -164,7 +183,7 @@ export async function createRefund(
 
   await withAuditedTransaction(async (tx, audit) => {
     const completed = await tx.stripeRefundOperation.updateMany({
-      where: { id: operation.id, stripeRefundId: null },
+      where: { id: operation.id, ...billingOwnerWhere(owner), stripeRefundId: null },
       data: {
         stripeRefundId: refund.id,
         status: refund.status ?? 'pending',
@@ -201,8 +220,9 @@ export async function createRefund(
 
 export async function listPayments(userId: string, input: { cursor?: string; limit: number }) {
   await getBillingUser(userId);
+  const owner = resolveBillingOwner(userId);
   const payments = await prisma.stripePayment.findMany({
-    where: { userId, deletedAt: null },
+    where: { ...billingOwnerWhere(owner), deletedAt: null },
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     take: input.limit + 1,
     ...(input.cursor ? { cursor: { id: input.cursor }, skip: 1 } : {}),

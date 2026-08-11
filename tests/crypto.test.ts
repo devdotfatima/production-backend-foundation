@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  candidateMetadataHashes,
+  candidateOpaqueTokenHashes,
   constantTimeEqual,
   decryptSecret,
   encryptSecret,
@@ -28,6 +30,8 @@ describe('credential primitives', () => {
     const token = randomToken();
     expect(hashOpaqueToken(token)).toBe(hashOpaqueToken(token));
     expect(hashOpaqueToken(token)).not.toBe(hashOpaqueToken(`${token}x`));
+    expect(candidateOpaqueTokenHashes(token)).toContain(hashOpaqueToken(token));
+    expect(candidateMetadataHashes(token)).toHaveLength(2);
   });
 
   it('uses constant-time equality and six-digit OTPs', () => {
